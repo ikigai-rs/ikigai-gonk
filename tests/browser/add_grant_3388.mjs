@@ -33,6 +33,16 @@ const PAGE = `<!doctype html><html lang="en"><head><title>gonk</title>
 <div id="status" role="status" aria-live="polite"></div>
 <main id="main"><h1>Ledger</h1></main></body></html>`;
 
+// The session cookie as gonk's server sets and clears it (src/identity.rs, ledger #1591).
+const COOKIE = { name: "gonk_session", httpOnly: true, sameSite: "Strict" };
+const CLEAR = "gonk_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0";
+const sessionOf = (headers) => /(?:^|;\s*)gonk_session=([^;]*)/.exec(headers.cookie ?? "")?.[1] ?? "";
+// What the browser holds (the driver's cookie API sees HttpOnly cookies; document.cookie does not).
+const jar = async (context) => {
+  const c = (await context.cookies()).find((c) => c.name === "gonk_session");
+  return { cookie: c ? c.value : "", httpOnly: c ? c.httpOnly : undefined };
+};
+
 const browser = await chromium.launch();
 let failures = 0;
 const check = async (name, fn) => {
@@ -75,42 +85,43 @@ async function open({ signedIn, refuse = false }) {
     };
   });
   if (signedIn) {
-    await context.addCookies([{ name: "gonk_session", value: "old-token", url: "http://localhost:9/" }]);
+    // HttpOnly, as gonk sets it (ledger #1591): the page's script can neither read nor write it.
+    await context.addCookies([{ ...COOKIE, value: "old-token", url: "http://localhost:9/" }]);
   }
-  await page.route("http://localhost:9/**", (route) => {
+  await page.route("http://localhost:9/**", async (route) => {
     const req = route.request();
     const path = new URL(req.url()).pathname;
     const body = req.postData() ?? "";
-    calls.push({ path, body });
-    const json = (status, value) =>
-      route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
+    const token = sessionOf(await req.allHeaders());
+    calls.push({ path, body, token });
+    const json = (status, value, headers = {}) =>
+      route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(value) });
     switch (path) {
       case "/gonk.js":
         return route.fulfill({ contentType: "text/javascript", body: gonk });
       case "/auth/session":
-        return sessions.has(body) ? json(200, sessions.get(body)) : route.fulfill({ status: 404, body: "no session" });
+        return sessions.has(token) ? json(200, sessions.get(token)) : route.fulfill({ status: 404, body: "no session" });
       case "/auth/logout":
-        sessions.delete(body);
-        return json(200, {});
+        sessions.delete(token);
+        return json(200, {}, { "Set-Cookie": CLEAR });
       case "/auth/add-grant-options": {
-        const asked = JSON.parse(body);
-        if (!sessions.has(asked.session)) return route.fulfill({ status: 400, body: "you are not signed in" });
+        if (!sessions.has(token)) return route.fulfill({ status: 400, body: "you are not signed in" });
         return json(200, { challenge: "Y2hhbGxlbmdl", rpId: "localhost", grant: "writer", credential: "bGFwdG9w" });
       }
       case "/auth/add-grant": {
         if (refuse) return route.fulfill({ status: 403, body: "the passkey assertion was refused (user not verified)" });
         const asked = JSON.parse(body);
         assert.ok(asked.signature && asked.authenticatorData && asked.clientDataJSON, "a fresh assertion is sent");
-        sessions.delete(asked.session);
+        sessions.delete(token);
         sessions.set("new-token", { label: "laptop", grant: "viewer, writer" });
+        // The server's answer: the new session rides only in the HttpOnly cookie.
         return json(200, {
-          session: "new-token",
           seconds: 3600,
           label: "laptop",
           grant: "viewer, writer",
           grants: ["viewer", "writer"],
           added: "writer",
-        });
+        }, { "Set-Cookie": `gonk_session=new-token; Path=/; HttpOnly; SameSite=Strict; Max-Age=3600` });
       }
       case "/auth/register-options":
         return json(200, { challenge: "Y2hhbGxlbmdl", rpId: "localhost", grant: "writer" });
@@ -126,12 +137,12 @@ async function open({ signedIn, refuse = false }) {
   return { context, page, calls, sessions, errors };
 }
 
-const state = (page) =>
-  page.evaluate(() => ({
+const state = async (page) => ({
+  ...(await page.evaluate(() => ({
     status: document.getElementById("status").textContent,
     focus: document.activeElement && document.activeElement.id,
     who: document.getElementById("auth-who").hidden ? "" : document.getElementById("auth-who").textContent,
-    cookie: document.cookie,
+    script: document.cookie,
     choice: !document.getElementById("enrol-choice").hidden,
     note: !document.getElementById("enrol-signed-in").hidden,
     label: !document.getElementById("enrol-new").hidden,
@@ -140,7 +151,9 @@ const state = (page) =>
     gets: window.gets,
     creates: window.creates,
     hash: location.hash,
-  }));
+  }))),
+  ...(await jar(page.context())),
+});
 
 await check("signed in, adding is the default and asks the signed-in passkey for a fresh assertion", async () => {
   const { context, page, calls, sessions, errors } = await open({ signedIn: true });
@@ -153,7 +166,9 @@ await check("signed in, adding is the default and asks the signed-in passkey for
   await page.click("#enrol-submit");
   await page.waitForFunction(() => document.getElementById("status").textContent.includes("added"));
   s = await state(page);
-  assert.equal(s.cookie, "gonk_session=new-token", "the new session replaced the old");
+  assert.equal(s.cookie, "new-token", "the new session replaced the old");
+  assert.equal(s.httpOnly, true, "and is HttpOnly");
+  assert.equal(s.script, "", "the page's script never sees the token");
   assert.ok(!sessions.has("old-token"));
   assert.equal(s.hash, "", "the spent invite left the address");
   assert.equal(s.who, "Signed in as laptop (grant viewer, writer)", "the reloaded page reads the wider grant");
@@ -162,7 +177,8 @@ await check("signed in, adding is the default and asks the signed-in passkey for
   const sent = calls.find((c) => c.path === "/auth/add-grant");
   assert.ok(sent, "add-grant was posted");
   const body = JSON.parse(sent.body);
-  assert.equal(body.session, "old-token");
+  assert.equal(sent.token, "old-token", "add-grant is asked as the signed-in session, by its cookie");
+  assert.equal(body.session, undefined, "the page sends no token: it has none");
   assert.equal(body.invite, "abc");
   assert.equal(body.id, "bGFwdG9w");
   assert.ok(!calls.some((c) => c.path === "/auth/register" || c.path === "/auth/logout"));
@@ -179,7 +195,7 @@ await check("the assertion is asked of the signed-in passkey only", async () => 
   assert.deepEqual(s.gets, [[[..."laptop"].map((c) => c.charCodeAt(0))]]);
   assert.match(s.status, /^Could not add the grant: the passkey assertion was refused/);
   assert.equal(s.focus, "enrol-submit", "focus stays on the form's button");
-  assert.equal(s.cookie, "gonk_session=old-token", "a refusal ends nothing");
+  assert.equal(s.cookie, "old-token", "a refusal ends nothing");
   assert.equal(s.hash, "#invite=abc");
   assert.deepEqual(errors, []);
   await context.close();

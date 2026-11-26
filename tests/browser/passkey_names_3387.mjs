@@ -29,6 +29,10 @@ const PAGE = `<!doctype html><html lang="en"><head><title>gonk</title>
 <div id="status" role="status" aria-live="polite"></div>
 <main id="main"><h1>Ledger</h1></main></body></html>`;
 
+// The session cookie as gonk's server sets and clears it (src/identity.rs, ledger #1591).
+const CLEAR = "gonk_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0";
+const sessionOf = (headers) => /(?:^|;\s*)gonk_session=([^;]*)/.exec(headers.cookie ?? "")?.[1] ?? "";
+
 const browser = await chromium.launch();
 let failures = 0;
 const check = async (name, fn) => {
@@ -77,18 +81,19 @@ async function open({ signal, hash = "", grant = "owner-viewer", label = "laptop
       },
     });
   }, signal);
-  await page.route("http://localhost:9/**", (route) => {
+  await page.route("http://localhost:9/**", async (route) => {
     const req = route.request();
     const path = new URL(req.url()).pathname;
     const body = req.postData() ?? "";
-    calls.push({ path, body });
-    const json = (status, value) =>
-      route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
+    const token = sessionOf(await req.allHeaders());
+    calls.push({ path, body, token });
+    const json = (status, value, headers = {}) =>
+      route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(value) });
     switch (path) {
       case "/gonk.js":
         return route.fulfill({ contentType: "text/javascript; charset=utf-8", body: gonk }); // as gonk serves it
       case "/auth/session":
-        return body === "tok"
+        return token === "tok"
           ? json(200, { label, grant, scopes: [], seconds: 60 })
           : route.fulfill({ status: 401, body: "no session" });
       case "/auth/register-options":
@@ -98,7 +103,10 @@ async function open({ signal, hash = "", grant = "owner-viewer", label = "laptop
       case "/auth/login-options":
         return json(200, { challenge: "Y2hhbGxlbmdl", rpId: "localhost" });
       case "/auth/login":
-        return json(200, { session: "tok", seconds: 60, label, grant });
+        // The server's answer: the session rides only in the HttpOnly cookie.
+        return json(200, { seconds: 60, label, grant }, {
+          "Set-Cookie": "gonk_session=tok; Path=/; HttpOnly; SameSite=Strict; Max-Age=60",
+        });
       default:
         return route.fulfill({ contentType: "text/html", body: PAGE });
     }
@@ -192,8 +200,9 @@ await check("without the signal a sign-in completes as before, silently", async 
   await reloaded;
   await page.waitForFunction(() => !document.getElementById("auth-who").hidden);
   const cookies = await context.cookies();
-  assert.ok(cookies.some((c) => c.name === "gonk_session" && c.value === "tok"), "signed in");
-  assert.ok(calls.some((c) => c.path === "/auth/session" && c.body === "tok"), "the reloaded page asked as the new session");
+  assert.ok(cookies.some((c) => c.name === "gonk_session" && c.value === "tok" && c.httpOnly), "signed in, HttpOnly");
+  assert.equal(await page.evaluate(() => document.cookie), "", "the page's script never sees the token");
+  assert.ok(calls.some((c) => c.path === "/auth/session" && c.token === "tok"), "the reloaded page asked as the new session");
   assert.equal(await page.evaluate(() => document.getElementById("status").textContent), "");
   assert.deepEqual(errors, []);
   await context.close();
@@ -211,8 +220,9 @@ await check("a signal that rejects does not stop the sign-in", async () => {
   await reloaded;
   await page.waitForFunction(() => !document.getElementById("auth-who").hidden);
   const cookies = await context.cookies();
-  assert.ok(cookies.some((c) => c.name === "gonk_session" && c.value === "tok"), "signed in");
-  assert.ok(calls.some((c) => c.path === "/auth/session" && c.body === "tok"), "the reloaded page asked as the new session");
+  assert.ok(cookies.some((c) => c.name === "gonk_session" && c.value === "tok" && c.httpOnly), "signed in, HttpOnly");
+  assert.equal(await page.evaluate(() => document.cookie), "", "the page's script never sees the token");
+  assert.ok(calls.some((c) => c.path === "/auth/session" && c.token === "tok"), "the reloaded page asked as the new session");
   assert.deepEqual(errors, []);
   await context.close();
 });

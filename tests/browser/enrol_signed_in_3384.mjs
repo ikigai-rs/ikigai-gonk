@@ -25,6 +25,11 @@ const PAGE = `<!doctype html><html lang="en"><head><title>gonk</title>
 <div id="status" role="status" aria-live="polite"></div>
 <main id="main"><h1>Ledger</h1></main></body></html>`;
 
+// The session cookie as gonk's server sets and clears it (src/identity.rs, ledger #1591).
+const COOKIE = { name: "gonk_session", httpOnly: true, sameSite: "Strict" };
+const CLEAR = "gonk_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0";
+const sessionOf = (headers) => /(?:^|;\s*)gonk_session=([^;]*)/.exec(headers.cookie ?? "")?.[1] ?? "";
+
 const browser = await chromium.launch();
 let failures = 0;
 const check = async (name, fn) => {
@@ -59,25 +64,27 @@ async function open({ signedIn, taken = [] }) {
     };
   });
   if (signedIn) {
-    await context.addCookies([{ name: "gonk_session", value: "old-token", url: "http://localhost:9/" }]);
+    // HttpOnly, as gonk sets it (ledger #1591): the page's script can neither read nor write it.
+    await context.addCookies([{ ...COOKIE, value: "old-token", url: "http://localhost:9/" }]);
   }
-  await page.route("http://localhost:9/**", (route) => {
+  await page.route("http://localhost:9/**", async (route) => {
     const req = route.request();
     const path = new URL(req.url()).pathname;
     const body = req.postData() ?? "";
-    calls.push({ path, body });
-    const json = (status, value) =>
-      route.fulfill({ status, contentType: "application/json", body: JSON.stringify(value) });
+    const token = sessionOf(await req.allHeaders());
+    calls.push({ path, body, token });
+    const json = (status, value, headers = {}) =>
+      route.fulfill({ status, contentType: "application/json", headers, body: JSON.stringify(value) });
     switch (path) {
       case "/gonk.js":
         return route.fulfill({ contentType: "text/javascript", body: gonk });
       case "/auth/session":
-        return sessions.has(body)
+        return sessions.has(token)
           ? json(200, { label: "old laptop", grant: "reader" })
           : route.fulfill({ status: 401, body: "no session" });
       case "/auth/logout":
-        sessions.delete(body);
-        return json(200, {});
+        sessions.delete(token);
+        return json(200, {}, { "Set-Cookie": CLEAR });
       case "/auth/register-options": {
         const label = JSON.parse(body || "{}").label;
         if (taken.includes(label)) {
@@ -107,7 +114,7 @@ const state = (page) =>
     login: !document.getElementById("auth-login").hidden,
     logout: !document.getElementById("auth-logout").hidden,
     who: document.getElementById("auth-who").hidden ? "" : document.getElementById("auth-who").textContent,
-    cookie: document.cookie,
+    script: document.cookie,
     creates: window.creates,
   }));
 
@@ -117,9 +124,11 @@ await check("a passkey created while signed in ends the old session and focuses 
   await page.click("#enrol-form button");
   await page.waitForFunction(() => document.getElementById("status").textContent.includes("Passkey created"));
   const s = await state(page);
-  assert.equal(s.cookie, "", "the session cookie is gone");
+  const jar = (await context.cookies()).filter((c) => c.name === "gonk_session");
+  assert.deepEqual(jar, [], "the session cookie is gone");
+  assert.equal(s.script, "", "the page's script never saw it");
   assert.equal(sessions.size, 0, "the server was told: the old session is ended there too");
-  assert.ok(calls.some((c) => c.path === "/auth/logout" && c.body === "old-token"));
+  assert.ok(calls.some((c) => c.path === "/auth/logout" && c.token === "old-token"));
   assert.equal(s.logout, false, "no Sign out left for a session that is over");
   assert.equal(s.who, "", "no 'Signed in as' the old passkey");
   assert.equal(s.login, true);

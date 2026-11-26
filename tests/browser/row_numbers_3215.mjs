@@ -29,7 +29,7 @@ try {
           await page.goto(`http://127.0.0.1:${server.addr.port}/${file}.html`);
           await page.evaluate((theme) => document.documentElement.dataset.theme = theme, theme);
           if (file.endsWith("ledger")) {
-            assert.equal(await page.locator("li.row .num").innerText(), "#1");
+            assert.equal(await page.locator("li.row .num").first().innerText(), "#1");
             const ledger = file === "named-ledger" ? "crew" : "default";
             const title = ledger === "crew" ? "A crew item" : "An item for the checker to read";
             const link = page.getByRole("link", { name: `${title} (in ${ledger})`, exact: true });
