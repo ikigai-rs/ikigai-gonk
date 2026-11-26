@@ -1480,3 +1480,49 @@ fn an_invite_that_cannot_check_its_name_mints_nothing() {
     }
     assert_eq!(open_codes(&keys), 0);
 }
+
+#[test]
+fn onboarding_rejects_an_unreadable_face_before_minting_an_invite() {
+    use ikigai_core::{Invocation, Resolution, Scope};
+    let (keys, public) = keystore();
+    let edge = Edge::new("brian", &public);
+    let gonk = Gonk::new(&edge, Arc::clone(&keys), &public);
+    let space = gonk.onboard.space();
+    let cap = Capability::root();
+    let invoke = |req: &Request| {
+        let Resolution::Hit(route) = space.resolve(req, &Scope::empty()) else {
+            panic!("missing endpoint for {}", req.target);
+        };
+        block_on(
+            route
+                .endpoint
+                .invoke(&Invocation::detached(req, &route.bindings, &cap)),
+        )
+    };
+    let status = Request::new(Verb::Source, Iri::parse(onboard::STATUS).unwrap());
+    assert_eq!(invoke(&status).unwrap().repr_type.media_type, "text/plain");
+    assert_eq!(
+        invoke(&status.with_arg("as", ArgRef::Inline(b"application/json".to_vec())))
+            .unwrap()
+            .repr_type
+            .media_type,
+        "application/json"
+    );
+    let invite = Request::new(Verb::Sink, Iri::parse(onboard::INVITE).unwrap())
+        .with_arg("name", ArgRef::Inline(b"new-worker".to_vec()))
+        .with_arg("kind", ArgRef::Inline(b"worker".to_vec()));
+    let before = open_codes(&keys);
+    for arg in [
+        ArgRef::Inline(vec![0xff]),
+        ArgRef::Reference(Iri::parse("urn:test:format").unwrap()),
+        ArgRef::Content(ikigai_core::ContentId::of(b"format")),
+    ] {
+        let error = invoke(&invite.clone().with_arg("as", arg));
+        assert!(matches!(error, Err(Error::InvalidArgument { name, .. }) if name == "as"));
+    }
+    assert_eq!(
+        open_codes(&keys),
+        before,
+        "a bad face did not mint an invite"
+    );
+}

@@ -397,8 +397,7 @@ impl Harness {
     ) -> Result<Harness> {
         let filters = filter::Filters::from_inv(inv)?;
         let asked = inv
-            .inline_str("root")
-            .ok()
+            .optional_str("root")?
             .map(str::trim)
             .filter(|r| !r.is_empty());
         if let Some(root) = asked {
@@ -685,12 +684,11 @@ fn cell(row: &[Option<Term>], vars: &[String], name: &str) -> Option<String> {
 
 // ------------------------------------------------------------------------------ the faces
 
-fn face(inv: &Invocation<'_>, default: &str) -> String {
-    inv.inline_str("as")
-        .ok()
+fn face(inv: &Invocation<'_>, default: &str) -> Result<String> {
+    Ok(inv
+        .optional_str("as")?
         .map(|a| a.split(';').next().unwrap_or(a).trim().to_string())
-        .filter(|a| !a.is_empty())
-        .unwrap_or_else(|| default.to_string())
+        .unwrap_or_else(|| default.to_string()))
 }
 
 fn refuse_face(asked: &str, served: &[&str]) -> Error {
@@ -821,7 +819,7 @@ impl Endpoint for Thing {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let id = web::binding(inv, "id")?;
         let id = checked_id(&id)?;
-        let asked = face(inv, TURTLE);
+        let asked = face(inv, TURTLE)?;
         if ![TURTLE, JSON, TEXT, HTML].contains(&asked.as_str()) {
             return Err(refuse_face(&asked, &[TURTLE, JSON, TEXT, HTML]));
         }
@@ -1094,7 +1092,7 @@ fn result_text(q: &Question, rows: &Rows) -> String {
 impl Endpoint for Coverage {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let q = question(&web::binding(inv, "name")?)?;
-        let asked = face(inv, JSON);
+        let asked = face(inv, JSON)?;
         let served = [JSON, TURTLE, TEXT, QUERY_TEXT, HTML];
         if !served.contains(&asked.as_str()) {
             return Err(refuse_face(&asked, &served));
@@ -1225,7 +1223,7 @@ impl Endpoint for FiringDay {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let date = web::binding(inv, "date")?;
         let date = checked_date(&date)?;
-        let asked = face(inv, TURTLE);
+        let asked = face(inv, TURTLE)?;
         if ![TURTLE, JSON, TEXT, HTML].contains(&asked.as_str()) {
             return Err(refuse_face(&asked, &[TURTLE, JSON, TEXT, HTML]));
         }

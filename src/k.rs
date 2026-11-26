@@ -320,24 +320,24 @@ impl KAdapter {
                 .into(),
             ));
         }
-        let content_type = inv.inline_str("content-type").unwrap_or_default();
+        let content_type = inv.optional_str("content-type")?.unwrap_or_default();
         // ⚠ Read as BYTES and refused loudly when they are not text. This adapter's
         // arguments are the text of a command line, so a non-UTF-8 payload has nowhere to
         // go — and a body accepted and then dropped is the truncating kind of bound. An
         // annotation body is text; a caller with bytes to write has the resource's own IRI.
-        let body = match inv.inline_arg("content") {
-            Ok(bytes) => String::from_utf8(bytes.to_vec()).map_err(|_| Error::InvalidArgument {
+        let body = match inv.optional_arg("content")? {
+            Some(bytes) => std::str::from_utf8(bytes).map_err(|_| Error::InvalidArgument {
                 name: "content".to_string(),
                 detail: "the request body is not UTF-8, and this adapter's arguments are text"
                     .to_string(),
             })?,
-            Err(_) => String::new(),
+            None => "",
         };
         let mut args: BTreeMap<String, String> = command.args.iter().cloned().collect();
         if content_type.starts_with("application/x-www-form-urlencoded") {
-            args.extend(web::form(&body));
+            args.extend(web::form(body));
         } else if !body.is_empty() {
-            args.insert("content".to_string(), body);
+            args.insert("content".to_string(), body.to_string());
             if !content_type.is_empty() {
                 args.insert("content-type".to_string(), content_type.to_string());
             }

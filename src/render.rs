@@ -910,6 +910,7 @@ fn themed(document: &str, page: String) -> String {
 /// unknown value degrades to a readable page. With a script the page's theme is the browser's
 /// business and `theme=` is never sent; this is the chooser's Apply button with no script.
 pub fn theme_of(inv: &Invocation<'_>) -> &'static str {
+    // optional-arg: deliberate: an unreadable or unsupported theme still gets the readable auto theme.
     inv.inline_str("theme")
         .ok()
         .and_then(|asked| ikigai_ui::THEMES.iter().find(|t| **t == asked).copied())

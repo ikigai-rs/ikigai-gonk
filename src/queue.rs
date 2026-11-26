@@ -592,17 +592,22 @@ pub(crate) struct Params {
 
 impl Params {
     /// From a Source's query arguments.
-    fn from(inv: &Invocation<'_>) -> Params {
-        let arg = |name: &str| inv.inline_str(name).ok().map(str::to_string);
-        Params {
-            state: arg("state"),
-            repo: arg("repo"),
-            limit: arg("limit"),
-            scope: arg(SCOPE_ARG),
-            group: arg(crate::batch::GROUP_ARG),
-            summary: arg(crate::walk::SUMMARY_ARG),
-            refuted: crate::verdict::refuted_arg().and_then(arg),
-        }
+    fn from(inv: &Invocation<'_>) -> Result<Params> {
+        let arg = |name: &str| -> Result<Option<String>> {
+            Ok(inv.optional_str(name)?.map(str::to_string))
+        };
+        Ok(Params {
+            state: arg("state")?,
+            repo: arg("repo")?,
+            limit: arg("limit")?,
+            scope: arg(SCOPE_ARG)?,
+            group: arg(crate::batch::GROUP_ARG)?,
+            summary: arg(crate::walk::SUMMARY_ARG)?,
+            refuted: crate::verdict::refuted_arg()
+                .map(arg)
+                .transpose()?
+                .flatten(),
+        })
     }
 }
 
@@ -2720,7 +2725,7 @@ impl Endpoint for QueuePage {
             ));
         }
         web::html_only(inv)?;
-        self.body(inv, &Params::from(inv), None, Echo::Nothing)
+        self.body(inv, &Params::from(inv)?, None, Echo::Nothing)
             .await
     }
 

@@ -1291,3 +1291,53 @@ fn pull_request_panels_require_a_configured_github_repository() {
         }
     }
 }
+
+#[test]
+fn git_objects_do_not_silently_replace_an_unreadable_face_with_json() {
+    use ikigai_core::{Invocation, Resolution, Scope, Space};
+    let (dir, head) = scratch(None);
+    let repo = ikigai_gonk::git_object::Repository {
+        name: "demo".to_string(),
+        dir: dir.path().into(),
+        commit: None,
+        blob: None,
+        file: None,
+        browse: false,
+    };
+    let space = ikigai_gonk::git_object::space("test", &[repo]);
+    let iri = ikigai_gonk::git_object::object_iri("test", "demo", &head);
+    let req = request(&iri, &[]);
+    let cap = Capability::root();
+    let invoke = |req: &Request| {
+        let Resolution::Hit(route) = space.resolve(req, &Scope::empty()) else {
+            panic!("missing endpoint for {iri}");
+        };
+        block_on(
+            route
+                .endpoint
+                .invoke(&Invocation::detached(req, &route.bindings, &cap)),
+        )
+    };
+    assert_eq!(
+        invoke(&req).unwrap().repr_type.media_type,
+        "application/json"
+    );
+    assert_eq!(
+        invoke(
+            &req.clone()
+                .with_arg("as", ArgRef::Inline(b"text/html".to_vec()))
+        )
+        .unwrap()
+        .repr_type
+        .media_type,
+        "text/html"
+    );
+    for arg in [
+        ArgRef::Inline(vec![0xff]),
+        ArgRef::Reference(Iri::parse("urn:test:format").unwrap()),
+        ArgRef::Content(ikigai_core::ContentId::of(b"format")),
+    ] {
+        let error = invoke(&req.clone().with_arg("as", arg));
+        assert!(matches!(error, Err(Error::InvalidArgument { name, .. }) if name == "as"));
+    }
+}

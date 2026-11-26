@@ -2864,14 +2864,6 @@ fn layer_binding(inv: &Invocation<'_>) -> Result<String> {
     Ok(layer)
 }
 
-fn optional_arg(inv: &Invocation<'_>, name: &str) -> Option<String> {
-    inv.inline_str(name)
-        .ok()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
-}
-
 fn arg(name: &str, summary: &str) -> ArgSpec {
     ArgSpec::new(name).summary(summary).class(XSD_STRING)
 }
@@ -3326,9 +3318,15 @@ impl Endpoint for LayerPage {
             attributes.extend(me_attributes(&snapshot));
             let posts = may_post(&snapshot, &found.info) && inv.capability.allows(CAP_SAY);
             if posts {
-                let reply = optional_arg(inv, "reply")
-                    .filter(|id| is_entry_id(id))
-                    .filter(|id| found.entries.iter().any(|e| &e.id == id));
+                let reply = crate::web::optional_nonblank(inv, "reply")?;
+                if reply.as_deref().is_some_and(|id| !is_entry_id(id)) {
+                    return Err(Error::InvalidArgument {
+                        name: "reply".to_string(),
+                        detail: "expected a layer entry ID".to_string(),
+                    });
+                }
+                // A well-formed reply target can age out of the visible page.
+                let reply = reply.filter(|id| found.entries.iter().any(|e| &e.id == id));
                 children.push_str(&say_form(&layer, &found.info.label, reply.as_deref()));
             } else if found.info.is_feed() {
                 attributes.push((
@@ -3602,6 +3600,23 @@ fn say_form(layer: &str, label: &str, reply: Option<&str>) -> String {
     element("say", &attributes, "")
 }
 
+fn seen_arg(inv: &Invocation<'_>, dash_means_unknown: bool) -> Result<Option<u64>> {
+    let seen = inv.optional_str("seen")?.map(str::trim);
+    match seen {
+        None => Ok(None),
+        Some("-") if dash_means_unknown => Ok(None),
+        Some(seen) => seen.parse().map(Some).map_err(|_| Error::InvalidArgument {
+            name: "seen".to_string(),
+            detail: if dash_means_unknown {
+                "expected a non-negative integer, or - if no count is shown"
+            } else {
+                "expected a non-negative integer"
+            }
+            .to_string(),
+        }),
+    }
+}
+
 /// `urn:iki:gonk:fragment:layers-wait`: what an open Layers page asks every few seconds. It
 /// answers AT ONCE, from this process's copy and the cursors (never the door), with a new watcher
 /// and whatever changed since the page's: the new entries, a task layer's lists, the overview's
@@ -3627,7 +3642,7 @@ impl Endpoint for Wait {
                     name: "after".to_string(),
                     detail: "not a non-negative integer".to_string(),
                 })?;
-        let layer = optional_arg(inv, "layer");
+        let layer = crate::web::optional_nonblank(inv, "layer")?;
         if let Some(name) = &layer {
             if !crate::layer::is_layer_name(name) {
                 return Err(Error::InvalidArgument {
@@ -3637,7 +3652,7 @@ impl Endpoint for Wait {
             }
         }
         // What the page's banner shows; absent (a page from before ledger #1705), it differs.
-        let door_was = optional_arg(inv, "door");
+        let door_was = crate::web::optional_nonblank(inv, "door")?;
         // The follower is started by the page; after a restart of gonk it is this ask that
         // starts it again, and until it has read the door the copy says "reading".
         view.start();
@@ -3654,10 +3669,8 @@ impl Endpoint for Wait {
         let who_views = viewer(inv);
         match &layer {
             None => {
-                let seen_before: u64 = optional_arg(inv, "seen")
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(0);
-                let kind = optional_arg(inv, "kind");
+                let seen_before = seen_arg(inv, false)?.unwrap_or(0);
+                let kind = crate::web::optional_nonblank(inv, "kind")?;
                 let (rows, total) = overview_rows(&snapshot, view, &who_views, kind.as_deref());
                 // ★ The rows are replaced only when they changed: the copy moved (`after` is
                 // the epoch the page shows; a restarted gonk counts from 0 again, so any
@@ -3844,8 +3857,8 @@ impl Endpoint for Count {
                 format!("the layers' unread count needs {CAP_READ}").into(),
             ));
         }
-        let seen: Option<u64> = optional_arg(inv, "seen").and_then(|v| v.parse().ok());
-        let open = optional_arg(inv, "open");
+        let seen = seen_arg(inv, true)?;
+        let open = crate::web::optional_nonblank(inv, "open")?;
         if let Some(name) = &open {
             if !crate::layer::is_layer_name(name) {
                 return Err(Error::InvalidArgument {
@@ -3854,8 +3867,8 @@ impl Endpoint for Count {
                 });
             }
         }
-        let quiet = optional_arg(inv, "quiet").as_deref() == Some("1");
-        let kinds = optional_arg(inv, "kinds").as_deref() == Some("1");
+        let quiet = crate::web::optional_nonblank(inv, "quiet")?.as_deref() == Some("1");
+        let kinds = crate::web::optional_nonblank(inv, "kinds")?.as_deref() == Some("1");
         let mut attributes: Vec<(&str, String)> = vec![("view", "layers-count".to_string())];
         let mut children = String::new();
         // Not configured: an inert badge, and no next poll.
