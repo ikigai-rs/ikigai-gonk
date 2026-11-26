@@ -5,8 +5,17 @@
 //! `grant` or `grants`, grants spelled `urn:cap:exec:git`, and an `invites.json`. Each is
 //! started through this server's migrations, and the migrated file must still start the OLD
 //! server: the rules [`old_reader_single`] and [`old_reader_list`] are those tags' own.
+//!
+//! The Layers page's per-viewer stores (ledger #4436), `layers-view/cursors.json` and
+//! `layers-view/subscription.json`, were keyed by the PASSKEY IRI through v0.25.0; each tag's
+//! fixture holds both, and a person must read what its passkey kept.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+
+use ikigai_core::{Error, Representation, Request};
+use ikigai_gonk::layer::Door;
+use ikigai_gonk::layers_view::{LayersView, Waits};
 
 use ikigai_gonk::identity::{self, Which};
 use ikigai_gonk::quic::Layout;
@@ -538,5 +547,72 @@ fn a_command_that_succeeds_on_an_old_form_file_writes_the_migration_and_the_back
                 "{tag} {what}"
             );
         }
+    }
+}
+
+/// A door nobody reads: the stores are read from files alone.
+struct Unread;
+
+impl Door for Unread {
+    fn call(&self, request: Request) -> Result<Representation, Error> {
+        Err(Error::Denied(
+            format!("not read here: {}", request.target.as_str()).into(),
+        ))
+    }
+}
+
+/// ★ Ledger #4436: every tag kept the Layers page's unread cursors and feed subscriptions
+/// under the passkey IRI. After the upgrade each person reads its own passkey's, the files
+/// keep the old keys for a downgrade, and the two people stay apart.
+#[test]
+fn every_tag_keeps_the_layers_cursors_and_subscriptions_for_the_person() {
+    let laptop = identity::passkey_iri("bGFwdG9w");
+    let phone = identity::passkey_iri("cGhvbmU");
+    for tag in TAGS {
+        let (dir, layout) = seeded(tag);
+        let store = dir.path().join("data").join("layers-view");
+        let cursors =
+            json!({ laptop.clone(): { "chat": 7, "ops": 2 }, phone.clone(): { "chat": 3 } });
+        let subscriptions = json!({
+            laptop.clone(): [{ "feed": "news", "concepts": ["urn:c:a"] }],
+            phone.clone(): [{ "feed": "events", "concepts": [] }]
+        });
+        write(&store.join("cursors.json"), &cursors);
+        write(&store.join("subscription.json"), &subscriptions);
+        drop(start(&layout));
+        let people = identity::read_passkeys(&layout).unwrap();
+        let (laptop_person, phone_person) = (&people["bGFwdG9w"].person, &people["cGhvbmU"].person);
+
+        let view = LayersView::new(
+            Arc::new(Unread),
+            "door".to_string(),
+            Some(store.join("cursors.json")),
+            Waits::default(),
+        );
+        view.adopt_former({
+            let layout = layout.clone();
+            Arc::new(move |p: &str| identity::former_principals(&layout, p))
+        });
+        assert_eq!(view.cursor(laptop_person, "chat"), 7, "{tag}");
+        assert_eq!(view.cursor(laptop_person, "ops"), 2, "{tag}");
+        assert_eq!(view.cursor(phone_person, "chat"), 3, "{tag}");
+        assert_eq!(
+            view.subscription(laptop_person, "news"),
+            Some(vec!["urn:c:a".to_string()]),
+            "{tag}"
+        );
+        assert_eq!(view.subscription(laptop_person, "events"), None, "{tag}");
+        assert_eq!(
+            view.subscription(phone_person, "events"),
+            Some(Vec::new()),
+            "{tag}"
+        );
+        // Nothing is written until a save, and the old keys are what an older gonk reads.
+        assert_eq!(read(&store.join("cursors.json")), cursors, "{tag}");
+        assert_eq!(
+            read(&store.join("subscription.json")),
+            subscriptions,
+            "{tag}"
+        );
     }
 }

@@ -342,6 +342,9 @@ pub struct PublicFeeds {
     fetch: Arc<dyn Fetch>,
     own: Option<Arc<LayersView>>,
     waits: Waits,
+    /// A person's former principals, for a view of the joined identity alone
+    /// ([`LayersView::adopt_former`]).
+    former: Option<crate::layers_view::Former>,
     /// One join at a time: two would mint one certificate each.
     joining: Mutex<()>,
     attached: Mutex<Attached>,
@@ -359,6 +362,20 @@ impl PublicFeeds {
         cursors: Option<PathBuf>,
         waits: Waits,
     ) -> Arc<PublicFeeds> {
+        PublicFeeds::open_with_former(door, data, fetch, own, cursors, waits, None)
+    }
+
+    /// [`PublicFeeds::open`], where a view of the joined identity alone lets each person adopt
+    /// what its passkeys kept before people ([`LayersView::adopt_former`], ledger #4436).
+    pub fn open_with_former(
+        door: String,
+        data: &Path,
+        fetch: Arc<dyn Fetch>,
+        own: Option<Arc<LayersView>>,
+        cursors: Option<PathBuf>,
+        waits: Waits,
+        former: Option<crate::layers_view::Former>,
+    ) -> Arc<PublicFeeds> {
         let feeds = Arc::new(PublicFeeds {
             door,
             dir: data.join("feeds").join("identity"),
@@ -366,6 +383,7 @@ impl PublicFeeds {
             fetch,
             own,
             waits,
+            former,
             joining: Mutex::new(()),
             attached: Mutex::new(Attached::default()),
         });
@@ -451,12 +469,16 @@ impl PublicFeeds {
         match &self.own {
             Some(own) => own.attach_public(reader),
             None => {
-                attached.view = Some(LayersView::public_only(
+                let view = LayersView::public_only(
                     reader,
                     record.address.clone(),
                     self.cursors.clone(),
                     self.waits,
-                ));
+                );
+                if let Some(former) = &self.former {
+                    view.adopt_former(Arc::clone(former));
+                }
+                attached.view = Some(view);
             }
         }
         attached.joined = Some(record);

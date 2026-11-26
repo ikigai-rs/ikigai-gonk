@@ -64,9 +64,20 @@
 //!
 //! # Unread
 //!
-//! Per viewer (the signed-in passkey's IRI) and per layer, the last feed position the viewer
+//! Per viewer (the signed-in person's IRI) and per layer, the last feed position the viewer
 //! was shown, kept in `<data home>/layers-view/cursors.json`: opening a layer, or a live update
 //! arriving on its open page, moves it. The overview counts the events after it.
+//!
+//! ★ **A person adopts what its passkeys kept** (ledger #4436). Before people (ledger #4305)
+//! the viewer was the signed-in PASSKEY's IRI, so both per-viewer stores (the cursors and
+//! `subscription.json`) hold entries under passkey IRIs. A person with no entry, or a smaller
+//! one, takes those of every passkey that names it ([`LayersView::adopt_former`]): the larger
+//! cursor per layer, and the union of the subscriptions, where a feed the person already has
+//! keeps the person's concepts. They are written under the person at the store's next save,
+//! the passkeys' entries stay for an older gonk after a downgrade, and what was adopted is
+//! marked in `cursors-adopted.json` and `subscription-adopted.json` beside them, so a feed the
+//! person later unsubscribes from is not adopted again. A passkey IRI that no enrolled passkey
+//! names is never read.
 //!
 //! # ★ The header's count: a short poll of this process's copy (ledger [#1700](http://localhost:1062/l/default/item/1700))
 //!
@@ -763,10 +774,151 @@ pub struct Snapshot {
 
 // ------------------------------------------------------------------------------ cursors
 
+/// Viewer → key (a layer, or a feed) → what that viewer keeps there.
+type ViewerMap<V> = BTreeMap<String, BTreeMap<String, V>>;
+
+/// What a person took over from the passkeys it was known by before people (ledger #4436).
+///
+/// Since people (ledger #4305) a signed-in request names the PERSON, so each person adopts
+/// what its passkeys kept under their passkey IRIs, the way a dispatcher cursor is adopted
+/// ([`crate::dispatch::space_with_former`]). Only the passkeys `former` names are read:
+/// a passkey IRI no enrolled passkey names is never moved. The passkeys' own entries stay in
+/// the file, for an older gonk after a downgrade.
+///
+/// Each adoption is marked with the passkey's entry as it was adopted, beside the store, once
+/// the store has saved the person's entries (until then a restart adopts again, to the same
+/// result). A later start takes only what changed in that passkey's entry since (an older gonk
+/// moved it after a downgrade), so a feed the person unsubscribed from stays unsubscribed.
+struct Adopted<V> {
+    path: Option<PathBuf>,
+    former: Former,
+    /// Person → passkey IRI → that passkey's entry as it was last adopted.
+    marks: ViewerMap<BTreeMap<String, V>>,
+    /// The viewers already looked at by this process.
+    checked: BTreeSet<String>,
+    unsaved: bool,
+}
+
+/// The principals a viewer was known by before people: [`crate::dispatch::Former`].
+pub type Former = crate::dispatch::Former;
+
+fn no_former() -> Former {
+    Arc::new(|_: &str| Vec::new())
+}
+
+impl<V> Adopted<V>
+where
+    V: Clone + PartialEq + serde::Serialize + serde::de::DeserializeOwned,
+{
+    fn open(path: Option<PathBuf>) -> Adopted<V> {
+        let marks = path
+            .as_ref()
+            .and_then(|p| std::fs::read(p).ok())
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Adopted {
+            path,
+            former: no_former(),
+            marks,
+            checked: BTreeSet::new(),
+            unsaved: false,
+        }
+    }
+
+    fn follow(&mut self, former: Former) {
+        self.former = former;
+        self.checked.clear();
+    }
+
+    /// Give `viewer` what its former principals keep in `map` that it has not adopted yet,
+    /// `merge`d into an entry it already has (`mine`, `theirs`).
+    fn adopt(&mut self, map: &mut ViewerMap<V>, viewer: &str, merge: fn(&mut V, &V)) {
+        if !self.checked.insert(viewer.to_string()) {
+            return;
+        }
+        for old in (self.former)(viewer) {
+            if old == viewer {
+                continue;
+            }
+            let Some(theirs) = map.get(&old).cloned() else {
+                continue;
+            };
+            let marked = self.marks.get(viewer).and_then(|m| m.get(&old)).cloned();
+            if marked.as_ref() == Some(&theirs) {
+                continue;
+            }
+            let mine = map.entry(viewer.to_string()).or_default();
+            for (key, value) in &theirs {
+                if marked.as_ref().and_then(|m| m.get(key)) == Some(value) {
+                    continue;
+                }
+                match mine.get_mut(key) {
+                    Some(held) => merge(held, value),
+                    None => {
+                        mine.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+            self.marks
+                .entry(viewer.to_string())
+                .or_default()
+                .insert(old, theirs);
+            self.unsaved = true;
+        }
+    }
+
+    /// Mark what was adopted, once the store has saved it.
+    fn saved(&mut self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+        if !self.unsaved {
+            return;
+        }
+        match write_atomically(
+            path,
+            &serde_json::to_vec_pretty(&self.marks).unwrap_or_default(),
+        ) {
+            Ok(()) => self.unsaved = false,
+            Err(e) => eprintln!(
+                "gonk: layers view: cannot save what people adopted to {}: {e}",
+                path.display()
+            ),
+        }
+    }
+}
+
+/// The store and what its people adopted, under one lock.
+struct Keyed<V> {
+    map: ViewerMap<V>,
+    adopted: Adopted<V>,
+}
+
+impl<V> Keyed<V>
+where
+    V: Clone + PartialEq + serde::Serialize + serde::de::DeserializeOwned,
+{
+    fn ready(&mut self, viewer: &str, merge: fn(&mut V, &V)) {
+        self.adopted.adopt(&mut self.map, viewer, merge);
+    }
+}
+
+fn adopted_path(path: &Option<PathBuf>, name: &str) -> Option<PathBuf> {
+    path.as_ref().map(|p| p.with_file_name(name))
+}
+
+/// A cursor two principals kept: the larger.
+fn larger(mine: &mut u64, theirs: &u64) {
+    *mine = (*mine).max(*theirs);
+}
+
+/// A feed both subscribe to: the person keeps its own concepts.
+fn keep_mine(_: &mut Vec<String>, _: &Vec<String>) {}
+
 /// The per-viewer, per-layer feed position each viewer was last shown.
 struct Cursors {
     path: Option<PathBuf>,
-    map: Mutex<BTreeMap<String, BTreeMap<String, u64>>>,
+    map: Mutex<Keyed<u64>>,
 }
 
 impl Cursors {
@@ -776,14 +928,22 @@ impl Cursors {
             .and_then(|p| std::fs::read(p).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        let adopted = Adopted::open(adopted_path(&path, "cursors-adopted.json"));
         Cursors {
             path,
-            map: Mutex::new(map),
+            map: Mutex::new(Keyed { map, adopted }),
         }
     }
 
+    fn follow(&self, former: Former) {
+        lock(&self.map).adopted.follow(former);
+    }
+
     fn get(&self, viewer: &str, layer: &str) -> u64 {
-        lock(&self.map)
+        let mut keyed = lock(&self.map);
+        keyed.ready(viewer, larger);
+        keyed
+            .map
             .get(viewer)
             .and_then(|m| m.get(layer))
             .copied()
@@ -793,8 +953,10 @@ impl Cursors {
     /// Move `viewer`'s cursor on `layer` to `seq`. A cursor past the layer's end (a restored
     /// host) is pulled back to it.
     fn set(&self, viewer: &str, layer: &str, seq: u64) {
-        let mut map = lock(&self.map);
-        let slot = map
+        let mut keyed = lock(&self.map);
+        keyed.ready(viewer, larger);
+        let slot = keyed
+            .map
             .entry(viewer.to_string())
             .or_default()
             .entry(layer.to_string())
@@ -806,13 +968,15 @@ impl Cursors {
         if let Some(path) = &self.path {
             // Best effort, and said when it fails: an unread marker is a convenience, and a page
             // must not fail because its directory is read-only.
-            if let Err(e) =
-                write_atomically(path, &serde_json::to_vec_pretty(&*map).unwrap_or_default())
-            {
-                eprintln!(
+            match write_atomically(
+                path,
+                &serde_json::to_vec_pretty(&keyed.map).unwrap_or_default(),
+            ) {
+                Ok(()) => keyed.adopted.saved(),
+                Err(e) => eprintln!(
                     "gonk: layers view: cannot save the unread cursors to {}: {e}",
                     path.display()
-                );
+                ),
             }
         }
     }
@@ -821,12 +985,12 @@ impl Cursors {
 // ------------------------------------------------------------------------------ subscriptions
 
 /// Viewer → feed → the concepts the viewer filters it by (none: the whole feed).
-type SubscriptionMap = BTreeMap<String, BTreeMap<String, Vec<String>>>;
+type SubscriptionMap = ViewerMap<Vec<String>>;
 
 /// Who subscribes to which feed, kept beside the cursors and never sent to the layer host.
 struct Subscriptions {
     path: Option<PathBuf>,
-    map: Mutex<SubscriptionMap>,
+    map: Mutex<Keyed<Vec<String>>>,
 }
 
 impl Subscriptions {
@@ -837,10 +1001,15 @@ impl Subscriptions {
             .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
             .map(|json| Subscriptions::parse(&json))
             .unwrap_or_default();
+        let adopted = Adopted::open(adopted_path(&path, "subscription-adopted.json"));
         Subscriptions {
             path,
-            map: Mutex::new(map),
+            map: Mutex::new(Keyed { map, adopted }),
         }
+    }
+
+    fn follow(&self, former: Former) {
+        lock(&self.map).adopted.follow(former);
     }
 
     fn parse(json: &serde_json::Value) -> SubscriptionMap {
@@ -864,11 +1033,13 @@ impl Subscriptions {
     }
 
     fn get(&self, viewer: &str, feed: &str) -> Option<Vec<String>> {
-        lock(&self.map).get(viewer)?.get(feed).cloned()
+        let mut keyed = lock(&self.map);
+        keyed.ready(viewer, keep_mine);
+        keyed.map.get(viewer)?.get(feed).cloned()
     }
 
     fn anyone(&self, feed: &str) -> bool {
-        lock(&self.map).values().any(|f| f.contains_key(feed))
+        lock(&self.map).map.values().any(|f| f.contains_key(feed))
     }
 
     /// Change `viewer`'s subscriptions, saved before it takes effect: unlike an unread marker, a
@@ -878,8 +1049,9 @@ impl Subscriptions {
         viewer: &str,
         update: impl FnOnce(&mut BTreeMap<String, Vec<String>>),
     ) -> Result<()> {
-        let mut map = lock(&self.map);
-        let mut next = map.clone();
+        let mut keyed = lock(&self.map);
+        keyed.ready(viewer, keep_mine);
+        let mut next = keyed.map.clone();
         update(next.entry(viewer.to_string()).or_default());
         if let Some(path) = &self.path {
             let rows: BTreeMap<&String, Vec<serde_json::Value>> = next
@@ -903,7 +1075,8 @@ impl Subscriptions {
                 },
             )?;
         }
-        *map = next;
+        keyed.map = next;
+        keyed.adopted.saved();
         Ok(())
     }
 }
@@ -1068,6 +1241,26 @@ impl LayersView {
     /// `default`.
     pub fn treat_as_local(&self, principals: impl IntoIterator<Item = String>) {
         lock(&self.local).extend(principals);
+    }
+
+    /// Let each person adopt the unread cursors and feed subscriptions its passkeys kept
+    /// before people (ledger #4436): `former` names a viewer's former principals, as
+    /// [`crate::identity::former_principals`] does. Without it a viewer adopts nothing.
+    pub fn adopt_former(&self, former: Former) {
+        self.cursors.follow(Arc::clone(&former));
+        self.subscriptions.follow(former);
+    }
+
+    /// The last feed position of `layer` that `viewer` was shown (0: none): what the unread
+    /// count starts after.
+    pub fn cursor(&self, viewer: &str, layer: &str) -> u64 {
+        self.cursors.get(viewer, layer)
+    }
+
+    /// The concepts `viewer` filters `feed` by (empty: the whole feed), or `None` when the
+    /// viewer does not subscribe to it.
+    pub fn subscription(&self, viewer: &str, feed: &str) -> Option<Vec<String>> {
+        self.subscriptions.get(viewer, feed)
     }
 
     /// The door, as the page names it.
@@ -4870,5 +5063,229 @@ mod tests {
             .call(get("urn:iki:ledger:default:items", &[]))
             .unwrap_err();
         assert!(matches!(refused, Error::Denied(_)), "{refused:?}");
+    }
+
+    // ------------------------------------------------- people adopt their passkeys' (#4436)
+
+    const LAPTOP: &str = "urn:iki:gonk:passkey:bGFwdG9w";
+    const PHONE: &str = "urn:iki:gonk:passkey:cGhvbmU";
+    const STRAY: &str = "urn:iki:gonk:passkey:c3RyYXk";
+    const PERSON: &str = "urn:iki:gonk:person:id:mSR27WSXo2kx";
+
+    /// The laptop and the phone are PERSON's; no enrolled passkey names [`STRAY`].
+    fn people() -> Former {
+        Arc::new(|principal: &str| {
+            if principal == PERSON {
+                vec![LAPTOP.to_string(), PHONE.to_string()]
+            } else {
+                Vec::new()
+            }
+        })
+    }
+
+    fn write_json(path: &Path, value: serde_json::Value) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    }
+
+    fn read_json(path: &Path) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    }
+
+    /// A view over a door nobody reads, its stores in `dir`, its people [`people`].
+    fn view_in(dir: &Path) -> Arc<LayersView> {
+        let view = LayersView::new(
+            Arc::new(Expired),
+            "door".to_string(),
+            Some(dir.join("layers-view").join("cursors.json")),
+            Waits::default(),
+        );
+        view.adopt_former(people());
+        view
+    }
+
+    fn info(name: &str, feed: Option<Scheme>) -> LayerInfo {
+        LayerInfo {
+            name: name.to_string(),
+            label: name.to_string(),
+            model: Model::Channel,
+            verbs: BTreeSet::new(),
+            feed,
+            public: false,
+            kind: None,
+        }
+    }
+
+    /// Discovered: `name` at feed position `last`.
+    fn holding(view: &LayersView, layers: &[(LayerInfo, u64)]) {
+        let mut state = lock(&view.state);
+        state.discovered = true;
+        for (info, last) in layers {
+            state.layers.insert(
+                info.name.clone(),
+                LayerView {
+                    info: info.clone(),
+                    last: *last,
+                    synced: true,
+                    entries: Vec::new(),
+                    tuples: Vec::new(),
+                    receipts: Vec::new(),
+                },
+            );
+        }
+    }
+
+    #[test]
+    fn a_person_adopts_its_passkeys_cursor_and_subscriptions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("layers-view");
+        write_json(
+            &store.join("cursors.json"),
+            serde_json::json!({ LAPTOP: { "chat": 7 } }),
+        );
+        write_json(
+            &store.join("subscription.json"),
+            serde_json::json!({ LAPTOP: [{ "feed": "news", "concepts": [] }] }),
+        );
+        let view = view_in(dir.path());
+        holding(
+            &view,
+            &[
+                (info("chat", None), 10),
+                (info("news", Some(Scheme::default())), 4),
+            ],
+        );
+        assert_eq!(view.subscription(PERSON, "news"), Some(Vec::new()));
+        assert_eq!(
+            view.unread(PERSON, None),
+            Some(3 + 4),
+            "only what came after the passkey's cursor, and the subscribed feed"
+        );
+        assert_eq!(view.tabs(PERSON).unwrap()[0].unread, 7);
+
+        // The next save writes the person's entries, and keeps the passkey's for a downgrade.
+        view.cursors.set(PERSON, "news", 4);
+        let saved = read_json(&store.join("cursors.json"));
+        assert_eq!(saved[PERSON]["chat"], 7, "{saved}");
+        assert_eq!(saved[LAPTOP]["chat"], 7, "{saved}");
+        view.subscriptions
+            .change(PERSON, |feeds| {
+                feeds.insert("events".to_string(), Vec::new());
+            })
+            .unwrap();
+        let saved = read_json(&store.join("subscription.json"));
+        assert_eq!(saved[PERSON].as_array().unwrap().len(), 2, "{saved}");
+        assert_eq!(saved[LAPTOP].as_array().unwrap().len(), 1, "{saved}");
+    }
+
+    #[test]
+    fn two_passkeys_of_one_person_give_the_larger_cursor_per_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("layers-view");
+        write_json(
+            &store.join("cursors.json"),
+            serde_json::json!({ LAPTOP: { "chat": 7, "ops": 1 }, PHONE: { "chat": 3, "ops": 5 } }),
+        );
+        write_json(
+            &store.join("subscription.json"),
+            serde_json::json!({
+                LAPTOP: [{ "feed": "news", "concepts": ["urn:c:a"] }],
+                PHONE: [{ "feed": "news", "concepts": ["urn:c:b"] }, { "feed": "events", "concepts": [] }]
+            }),
+        );
+        let view = view_in(dir.path());
+        assert_eq!(view.cursor(PERSON, "chat"), 7);
+        assert_eq!(view.cursor(PERSON, "ops"), 5);
+        assert_eq!(view.subscription(PERSON, "events"), Some(Vec::new()));
+        assert!(view.subscription(PERSON, "news").is_some(), "the union");
+    }
+
+    #[test]
+    fn a_person_with_its_own_cursor_and_feed_keeps_the_larger_and_its_concepts() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("layers-view");
+        write_json(
+            &store.join("cursors.json"),
+            serde_json::json!({ LAPTOP: { "chat": 7, "ops": 2 }, PERSON: { "chat": 4, "ops": 9 } }),
+        );
+        write_json(
+            &store.join("subscription.json"),
+            serde_json::json!({
+                LAPTOP: [{ "feed": "news", "concepts": ["urn:c:a"] }, { "feed": "events", "concepts": [] }],
+                PERSON: [{ "feed": "news", "concepts": ["urn:c:mine"] }]
+            }),
+        );
+        let view = view_in(dir.path());
+        assert_eq!(view.cursor(PERSON, "chat"), 7);
+        assert_eq!(view.cursor(PERSON, "ops"), 9);
+        assert_eq!(
+            view.subscription(PERSON, "news"),
+            Some(vec!["urn:c:mine".to_string()])
+        );
+        assert_eq!(view.subscription(PERSON, "events"), Some(Vec::new()));
+    }
+
+    #[test]
+    fn a_passkey_no_enrolled_passkey_names_stays_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("layers-view");
+        let cursors = serde_json::json!({ STRAY: { "chat": 7 } });
+        let subscriptions = serde_json::json!({ STRAY: [{ "feed": "news", "concepts": [] }] });
+        write_json(&store.join("cursors.json"), cursors.clone());
+        write_json(&store.join("subscription.json"), subscriptions.clone());
+        let view = view_in(dir.path());
+        assert_eq!(view.cursor(PERSON, "chat"), 0);
+        assert_eq!(view.subscription(PERSON, "news"), None);
+        view.cursors.set(PERSON, "ops", 1);
+        view.subscriptions
+            .change(PERSON, |feeds| {
+                feeds.insert("events".to_string(), Vec::new());
+            })
+            .unwrap();
+        assert_eq!(view.cursor(STRAY, "chat"), 7, "the stray keeps its own");
+        let saved = read_json(&store.join("cursors.json"));
+        assert_eq!(saved[STRAY], cursors[STRAY], "{saved}");
+        assert!(saved[PERSON].get("chat").is_none(), "{saved}");
+        let saved = read_json(&store.join("subscription.json"));
+        assert_eq!(saved[STRAY], subscriptions[STRAY], "{saved}");
+        assert_eq!(saved[PERSON].as_array().unwrap().len(), 1, "{saved}");
+    }
+
+    #[test]
+    fn an_unsubscribed_feed_is_not_adopted_again_after_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("layers-view");
+        write_json(
+            &store.join("subscription.json"),
+            serde_json::json!({ LAPTOP: [{ "feed": "news", "concepts": [] }, { "feed": "events", "concepts": [] }] }),
+        );
+        let view = view_in(dir.path());
+        view.subscriptions
+            .change(PERSON, |feeds| {
+                feeds.remove("news");
+            })
+            .unwrap();
+        drop(view);
+        let view = view_in(dir.path());
+        assert_eq!(
+            view.subscription(PERSON, "news"),
+            None,
+            "stays unsubscribed"
+        );
+        assert_eq!(view.subscription(PERSON, "events"), Some(Vec::new()));
+        // An older gonk, after a downgrade, subscribes the laptop to a feed: the next start
+        // adopts that one, and only that one.
+        drop(view);
+        write_json(
+            &store.join("subscription.json"),
+            serde_json::json!({
+                LAPTOP: [{ "feed": "news", "concepts": [] }, { "feed": "events", "concepts": [] },
+                         { "feed": "releases", "concepts": [] }],
+                PERSON: [{ "feed": "events", "concepts": [] }]
+            }),
+        );
+        let view = view_in(dir.path());
+        assert_eq!(view.subscription(PERSON, "releases"), Some(Vec::new()));
+        assert_eq!(view.subscription(PERSON, "news"), None);
     }
 }
