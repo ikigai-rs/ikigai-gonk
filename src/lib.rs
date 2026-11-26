@@ -79,6 +79,7 @@ pub mod lapse;
 pub mod layer;
 pub mod layer_kinds;
 pub mod layers_view;
+pub mod lenses;
 pub mod logfile;
 pub mod mirror;
 pub mod mount;
@@ -487,6 +488,8 @@ pub fn compose_serving_with_ledger_routes(
     // (`crate::sparql`). Bound with the store, always — it reaches nothing the store's own
     // scoped doors do not, and it is what lets `web.mount` prefer this socket.
     spaces.push(Arc::new(sparql::space()));
+    // gonk's lenses over the ledger graph (ledger #3959): data, read under the caller's grant.
+    spaces.push(Arc::new(lenses::space()));
     // Aliases are a deployment-wide authority with grants of their own, beside the ledgers
     // (`crate::grants::alias_grants`).
     spaces.push(Arc::new(ikigai_ledger::alias::space()));
