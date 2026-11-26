@@ -221,6 +221,10 @@ try {
   await page.locator("form.file button[type=submit]").first().focus();
   await page.keyboard.press("Enter");
   await page.locator("#ledger").getByText("A scratch item").first().waitFor();
+  // The row is in the DOM at the swap; focus moves at the settle after it, so give it a moment
+  // (htmx settles some milliseconds later) before reading where it is.
+  await page.waitForFunction(() => !!document.activeElement?.closest("#ledger"), null, { timeout: 5_000 })
+    .catch(() => {});
   const swapped = await page.evaluate(() => {
     const el = document.activeElement;
     return { tag: el.tagName, inRegion: !!el.closest("#ledger") };
