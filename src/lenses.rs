@@ -8,6 +8,10 @@
 //! | `urn:iki:ui:lens:name:gonk-dashboard` (and `:query`) | the Dashboard lens: the open and in-flight items of the ledger whose graph is the focus, a table whose rows carry `?item`, so a pane over it emits `item` |
 //! | `urn:iki:ui:lens:type:https://ikigai-rs.dev/ns/ledger#Item` | `["gonk-item"]`: a ledger item's lenses |
 //!
+//! Bound in the HTTP door's page space ([`crate::web::space_with`]), beside the item and page
+//! views they are lenses over, and not in the hub: a lens is a page's data, and the socket and
+//! QUIC doors serve no page.
+//!
 //! Each query is read-only and names no SERVICE, so `urn:iki:ui:lens:prepare` accepts it; it runs
 //! through `urn:sparql:select` under the CALLER's capability with the focus bound as a term, never
 //! spliced. Serving them as pages (`/lens/name/{lens}/resource/{iri}`) and a workspace over them
@@ -42,7 +46,12 @@ pub const LENSES: [(&str, &str, &str); 2] = [
 
 fn fixed(id: &str, title: &str, media: &'static str, body: &'static str) -> FnEndpoint {
     FnEndpoint::new(id, move |_: &Invocation<'_>| {
-        Ok(Representation::new(ReprType::new(media), body.as_bytes().to_vec()).cacheable())
+        // Not marked cacheable: the HTTP door's kernel stores nothing (`crate::doors`), as for
+        // the page assets, and a fixed body is cheap to hand back.
+        Ok(Representation::new(
+            ReprType::new(media),
+            body.as_bytes().to_vec(),
+        ))
     })
     .with_description(
         Description::new(id)
@@ -53,9 +62,9 @@ fn fixed(id: &str, title: &str, media: &'static str, body: &'static str) -> FnEn
     )
 }
 
-/// The lenses, their queries and the item type's list, as a space for the hub.
-pub fn space() -> EndpointSpace {
-    let mut space = EndpointSpace::new().bind(
+/// `space` with the lenses, their queries and the item type's list bound.
+pub fn bind(space: EndpointSpace) -> EndpointSpace {
+    let mut space = space.bind(
         Exact::new(ITEM_TYPE),
         fixed(
             "gonk-lens-type-item",

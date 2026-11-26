@@ -518,6 +518,9 @@ pub fn space_with(web: Arc<Web>, packs: Arc<crate::packs::Config>) -> EndpointSp
         );
     // The Dashboard's operator tabs (ledger #2972). Named after them: a bind clears a space's name,
     // which `tests/topology.rs` pins.
+    // The item lens and the Dashboard lens (ledger #3959, [`crate::lenses`]): the data of the
+    // item and Dashboard views above, so bound with them, in the pages and not the hub.
+    let space = crate::lenses::bind(space);
     crate::dashboard::bind_operator(space, &operator_web)
         .named(crate::spaces::iri(crate::spaces::PAGES))
 }

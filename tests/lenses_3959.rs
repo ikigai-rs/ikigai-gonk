@@ -74,13 +74,43 @@ fn lens_rows(hub: &Arc<Kernel>, name: &str, focus: &str) -> Vec<String> {
         .collect()
 }
 
+/// The HTTP door over `hub`, its pages bound as `main` binds them; the config home is `config`.
+fn http_door(hub: &Arc<Kernel>, config: &std::path::Path) -> Arc<Kernel> {
+    let passkeys = Arc::new(ikigai_gonk::identity::Passkeys::new(
+        ikigai_gonk::quic::Layout::in_config_home(config),
+        1060,
+    ));
+    let face = Arc::new(ikigai_gonk::web::Web {
+        hub: Arc::clone(hub),
+        ledgers: vec!["default".to_string()],
+        browse_roots: Vec::new().into(),
+        passkeys,
+        rules: ikigai_gonk::rules::DEFAULT_RULES.into(),
+        queue: ikigai_gonk::config::QueuePolicy::default(),
+        epochs: None,
+        holder_aliases: Default::default(),
+        display: Default::default(),
+        page_assets: Default::default(),
+        projects: Default::default(),
+        toolbox: false,
+        faces: Vec::new(),
+        inquiry: None,
+    });
+    Arc::new(ikigai_gonk::doors::http_kernel(
+        Arc::clone(hub),
+        ikigai_gonk::web::door_space(face, None, None),
+    ))
+}
+
 fn iri(answer: &str) -> String {
     answer.split_whitespace().nth(1).unwrap().to_string()
 }
 
 #[test]
 fn the_item_and_dashboard_lenses_answer_from_the_ledger_graph() {
+    let config = tempfile::tempdir().unwrap();
     let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
+    let door = http_door(&hub, config.path());
     let sink = |iri: &str, args: &[(&str, &str)]| ask(&hub, Verb::Sink, iri, args);
     let parent = iri(&sink(
         "urn:iki:ledger:default:append",
@@ -108,7 +138,7 @@ fn the_item_and_dashboard_lenses_answer_from_the_ledger_graph() {
     );
 
     // The Dashboard lens over the default ledger's graph: open items, the in-flight one first.
-    let board = lens_rows(&hub, "gonk-dashboard", "urn:iki:ledger:graph:default");
+    let board = lens_rows(&door, "gonk-dashboard", "urn:iki:ledger:graph:default");
     assert_eq!(
         board,
         [
@@ -130,7 +160,7 @@ fn the_item_and_dashboard_lenses_answer_from_the_ledger_graph() {
             ("evidence", "https://example.org/pull/1"),
         ],
     );
-    let item = lens_rows(&hub, "gonk-item", &parent);
+    let item = lens_rows(&door, "gonk-item", &parent);
     let parts: Vec<&str> = item
         .iter()
         .map(|row| row.split(" | ").next().unwrap())
@@ -166,9 +196,9 @@ fn the_item_and_dashboard_lenses_answer_from_the_ledger_graph() {
     );
 
     // Closed, it leaves the Dashboard; the child, in flight, shows who holds it.
-    let board = lens_rows(&hub, "gonk-dashboard", "urn:iki:ledger:graph:default");
+    let board = lens_rows(&door, "gonk-dashboard", "urn:iki:ledger:graph:default");
     assert_eq!(board.len(), 2, "{board:#?}");
-    let child_rows = lens_rows(&hub, "gonk-item", &child);
+    let child_rows = lens_rows(&door, "gonk-item", &child);
     assert!(
         child_rows
             .contains(&"part=state | resource= | text=in flight, held by worker-a".to_string()),
@@ -178,7 +208,7 @@ fn the_item_and_dashboard_lenses_answer_from_the_ledger_graph() {
 
     // Reopened, the close is no longer the item's verdict.
     sink("urn:iki:ledger:default:reopen", &[("item", "1")]);
-    let reopened = lens_rows(&hub, "gonk-item", &parent);
+    let reopened = lens_rows(&door, "gonk-item", &parent);
     assert!(
         !reopened
             .iter()
@@ -189,10 +219,33 @@ fn the_item_and_dashboard_lenses_answer_from_the_ledger_graph() {
 
 #[test]
 fn a_ledger_item_lists_the_item_lens() {
+    let config = tempfile::tempdir().unwrap();
     let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
-    let listed = ask(&hub, Verb::Source, ikigai_gonk::lenses::ITEM_TYPE, &[]);
+    let door = http_door(&hub, config.path());
+    let listed = ask(&door, Verb::Source, ikigai_gonk::lenses::ITEM_TYPE, &[]);
     assert_eq!(
         serde_json::from_str::<Vec<String>>(&listed).unwrap(),
         ["gonk-item"]
     );
+}
+
+/// The lenses are the HTTP door's pages' data: the hub, and so the socket and QUIC doors that
+/// serve its catalog, bind none of them (the backup and conformance walks pin that catalog).
+#[test]
+fn the_hub_and_the_socket_door_bind_no_lens() {
+    let hub = Arc::new(ikigai_gonk::compose(DurableStore::in_memory().unwrap()));
+    let socket = ikigai_gonk::doors::door_kernel(Arc::clone(&hub));
+    let mut iris = vec![ikigai_gonk::lenses::ITEM_TYPE.to_string()];
+    for (name, _, _) in ikigai_gonk::lenses::LENSES {
+        iris.push(format!("{}{name}", ikigai_gonk::lenses::NAME));
+        iris.push(format!("{}{name}:query", ikigai_gonk::lenses::NAME));
+    }
+    for iri in iris {
+        let iri = Iri::parse(&iri).unwrap();
+        assert!(hub.describe(&iri).is_none(), "the hub binds `{iri}`");
+        assert!(
+            socket.describe(&iri).is_none(),
+            "the socket door binds `{iri}`"
+        );
+    }
 }
