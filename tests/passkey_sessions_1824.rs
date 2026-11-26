@@ -75,6 +75,7 @@ impl Server {
             passkeys: Some(passkeys),
             public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         std::thread::spawn(move || {
             runtime.block_on(ikigai_web::serve_with_listener(
@@ -435,7 +436,12 @@ fn sign_ins_and_sign_outs_are_logged_and_a_token_never_is() {
         &grants_for("default", Authority::Write).unwrap(),
     );
     let id = credential(&laptop);
+    // ★ A line names the passkey's PERSON while it is enrolled (ledger #4305), and the
+    // passkey's own IRI once it is revoked: no enrollment says whose it was any more.
     let iri = identity::passkey_iri(&id);
+    let person = identity::read_passkeys(&server.layout).unwrap()[&id]
+        .person
+        .clone();
 
     // A refused sign-in: an assertion signed by the wrong key, under the enrolled id.
     let impostor = Authenticator {
@@ -472,15 +478,15 @@ fn sign_ins_and_sign_outs_are_logged_and_a_token_never_is() {
                  credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=0"
             ),
             format!(
-                "<urn:iki:gonk:class:Login> urn:iki:gonk:passkey:login door=http outcome=ok principal={iri} \
+                "<urn:iki:gonk:class:Login> urn:iki:gonk:passkey:login door=http outcome=ok principal={person} \
                  credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=1"
             ),
             format!(
-                "<urn:iki:gonk:class:Logout> urn:iki:gonk:passkey:logout door=http outcome=ok principal={iri} \
+                "<urn:iki:gonk:class:Logout> urn:iki:gonk:passkey:logout door=http outcome=ok principal={person} \
                  credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=1 why=logout"
             ),
             format!(
-                "<urn:iki:gonk:class:Login> urn:iki:gonk:passkey:login door=http outcome=ok principal={iri} \
+                "<urn:iki:gonk:class:Login> urn:iki:gonk:passkey:login door=http outcome=ok principal={person} \
                  credential=https://ikigai-rs.dev/ns/log#passkey passkey={id} sessions=1"
             ),
             format!(

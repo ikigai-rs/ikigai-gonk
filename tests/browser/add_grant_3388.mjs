@@ -15,7 +15,7 @@ const PAGE = `<!doctype html><html lang="en"><head><title>gonk</title>
 <header><div id="auth" class="auth">
   <span id="auth-who" class="who" hidden="hidden"></span>
   <button id="auth-login" type="button" hidden="hidden">Sign in with passkey</button>
-  <button id="auth-logout" type="button" hidden="hidden">Sign out</button>
+  <button id="auth-logout" type="button" hidden="hidden">Sign out on all devices</button>
   <a id="auth-localhost" hidden="hidden">Passkeys need localhost</a>
 </div></header>
 <section id="enrol" hidden="hidden">

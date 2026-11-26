@@ -16,6 +16,18 @@
 //! gonk/invites.json   { "<sha256 of an invite code>": { "grant": "brian", "expires": 1757… } }
 //! ```
 //!
+//! ★ **People** (ledger [#4305](http://localhost:1062/l/default/item/4305)): `clients.json`
+//! also holds `"people": { "<id>": { "label": "brian", "grants": ["brian"] } }`, and each
+//! passkey entry names `"person": "urn:iki:gonk:person:id:<id>"` and `"rp_id": "localhost"`
+//! in place of its own grants (its `grants`, and `grant` for a person with one, stay as a
+//! copy of its person's that only an older gonk reads, so a downgrade still starts, ledger
+//! #4368). People live in `clients.json`, not a file of their own, so a
+//! passkey and the person it names are written together, under the one clients lock, in one
+//! rename: no reader ever sees a passkey naming a person who is not there yet. An entry from
+//! before people is read as a person of its own (`parse_passkeys`) and written so at the
+//! next start, or before the next write ([`migrate_people`]). What follows says "a passkey's grants": they are its
+//! person's.
+//!
 //! A passkey holds a LIST of grant names (ledger [#3388](http://localhost:1062/l/default/item/3388);
 //! the single-name `"grant": "brian"` earlier servers wrote is still read) and its scopes are
 //! their union. A grant is shared, so one person is widened by adding a grant to their passkey
@@ -150,10 +162,80 @@ pub const RP_ID: &str = "localhost";
 pub const SESSION_COOKIE: &str = "gonk_session";
 
 /// The `Set-Cookie` value that opens a session: `HttpOnly`, `SameSite=Strict`, for the whole
-/// origin, for `seconds`. ⚠ No `Secure`: the HTTP door serves plain `http://localhost`; add it
-/// once the door is served over TLS.
+/// origin, for `seconds`. ⚠ No `Secure`: the local listener serves plain `http://localhost`;
+/// the public listener's cookie is [`Site::session_cookie`], which carries it.
 pub fn session_cookie(token: &str, seconds: u64) -> String {
     format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={seconds}")
+}
+
+/// The site a passkey ceremony runs at: one per HTTP listener (ledger #4367). The local
+/// listener's is `localhost` at `http://localhost:<port>`; the public listener's (behind a TLS
+/// proxy, `gonk.http.public_origin`) is the origin's full host at that `https://` origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Site {
+    /// The WebAuthn relying-party id: `localhost`, or the public origin's whole host (never a
+    /// parent domain: `ts.net` is a public suffix).
+    pub rp_id: String,
+    /// The only origin a ceremony at this site is accepted from.
+    pub origin: String,
+    /// Whether the session cookie carries `Secure` (the public listener, served over TLS).
+    pub secure: bool,
+}
+
+impl Site {
+    /// The local listener's site: `localhost` at `http://localhost:{port}`, no `Secure`.
+    pub fn local(port: u16) -> Site {
+        Site {
+            rp_id: RP_ID.to_string(),
+            origin: format!("http://localhost:{port}"),
+            secure: false,
+        }
+    }
+
+    /// The public listener's site at `origin` (`https://<host>`, already validated by
+    /// [`crate::config`]): its host is the relying party, and its cookie carries `Secure`.
+    ///
+    /// ```
+    /// use ikigai_gonk::identity::Site;
+    /// let site = Site::public("https://box.tail1.ts.net");
+    /// assert_eq!(site.rp_id, "box.tail1.ts.net");
+    /// assert!(site.session_cookie("t", 5).contains("; Secure"));
+    /// ```
+    pub fn public(origin: &str) -> Site {
+        let origin = origin.trim().trim_end_matches('/').to_ascii_lowercase();
+        let host = origin
+            .strip_prefix("https://")
+            .unwrap_or(&origin)
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        Site {
+            rp_id: host,
+            origin,
+            secure: true,
+        }
+    }
+
+    /// The `Set-Cookie` value that opens a session at this site ([`session_cookie`], plus
+    /// `Secure` at the public listener).
+    pub fn session_cookie(&self, token: &str, seconds: u64) -> String {
+        let cookie = session_cookie(token, seconds);
+        if self.secure {
+            format!("{cookie}; Secure")
+        } else {
+            cookie
+        }
+    }
+
+    /// The `Set-Cookie` value that ends the session at this site.
+    pub fn clear_session_cookie(&self) -> String {
+        if self.secure {
+            format!("{CLEAR_SESSION_COOKIE}; Secure")
+        } else {
+            CLEAR_SESSION_COOKIE.to_string()
+        }
+    }
 }
 
 /// The `Set-Cookie` value that ends the session in this browser.
@@ -161,14 +243,38 @@ pub const CLEAR_SESSION_COOKIE: &str =
     "gonk_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0";
 
 /// Who a passkey request says is signed in: a session token a caller holds (the socket, a
-/// test, an older page), or the door's principal, which the HTTP door derives from the
-/// HttpOnly cookie a page cannot read.
+/// test, an older page), or what the HTTP door derives from the HttpOnly cookie a page cannot
+/// read — the request's own session, by its key, beside the principal.
 #[derive(Clone, Copy, Debug)]
 pub enum SignedIn<'a> {
     /// A session token.
     Token(&'a str),
-    /// The capability's principal ([`passkey_iri`]), if any.
+    /// The capability's principal ([`passkey_iri`] or [`person_iri`]), if any, and no session
+    /// key: the newest live session of any passkey it stands for. A caller that has the
+    /// request's session key passes [`SignedIn::Session`] instead.
     Principal(Option<&'a str>),
+    /// The HTTP door's request (ledger #4363): the key of the session its cookie names (the
+    /// [`session_id`] of the token, which the door puts in the capability) and the principal
+    /// the door stamped. It answers THAT session only, never another device's session of the
+    /// same person; a key whose session's passkey the principal does not stand for answers
+    /// nobody.
+    Session {
+        /// The session's key in the session table: the SHA-256 of its token, hex.
+        key: &'a str,
+        /// The capability's principal, if any.
+        principal: Option<&'a str>,
+    },
+}
+
+impl SignedIn<'_> {
+    /// The principal this names, if it names one: the door's ([`SignedIn::Principal`],
+    /// [`SignedIn::Session`]), never a token's.
+    pub fn principal(&self) -> Option<&str> {
+        match self {
+            SignedIn::Token(_) => None,
+            SignedIn::Principal(principal) | SignedIn::Session { principal, .. } => *principal,
+        }
+    }
 }
 
 /// How long a session may WRITE (anything beyond read) at most, however busy it is and
@@ -293,6 +399,38 @@ pub fn principal_refusal(id: &str) -> Option<String> {
         })
 }
 
+/// The prefix of a person's IRI (ledger [#4305](http://localhost:1062/l/default/item/4305)):
+/// `urn:iki:gonk:person:id:<id>`. A person is what several passkeys name — a laptop's, a
+/// phone's, one registered at another origin — and holds the label and the grant list they
+/// share. The `<id>` is short, generated and base64url, so it needs no escaping and leaves the
+/// IRI far under core's principal length limit.
+pub const PERSON_IRI_PREFIX: &str = "urn:iki:gonk:person:id:";
+
+/// The IRI of the person `id` names.
+pub fn person_iri(id: &str) -> String {
+    format!("{PERSON_IRI_PREFIX}{id}")
+}
+
+/// The id a [`person_iri`] names, or `None` for any other text.
+pub fn person_id(iri: &str) -> Option<&str> {
+    iri.strip_prefix(PERSON_IRI_PREFIX)
+        .filter(|id| !id.is_empty())
+}
+
+/// The person id an enrollment from before people existed is migrated to: the first 9 bytes
+/// of the SHA-256 of its credential id, base64url (12 characters). Derived, not random, so a
+/// file read before its migration is written names the same person the migration writes, and
+/// a second migration has nothing to decide.
+fn migrated_person_id(credential_id: &str) -> String {
+    let digest = Sha256::digest(credential_id.as_bytes());
+    URL_SAFE_NO_PAD.encode(&digest[..9])
+}
+
+/// A fresh person id: 9 random bytes, base64url (12 characters).
+fn new_person_id() -> Result<String, String> {
+    random_b64(9)
+}
+
 /// The credential id a [`passkey_iri`] names, or `None` for any other text — a plain-name
 /// author written by hand, or by the cli.
 pub fn passkey_credential(author: &str) -> Option<&str> {
@@ -304,7 +442,13 @@ pub fn passkey_credential(author: &str) -> Option<&str> {
 pub struct Enrolled {
     /// base64url of the credential id.
     pub credential_id: String,
-    /// The grant names — keys of `grants.json` — this passkey holds, in the order they were
+    /// The person this passkey names ([`person_iri`]). Several passkeys may name one person.
+    pub person: String,
+    /// The WebAuthn relying-party id this passkey was registered at ([`RP_ID`] for every
+    /// passkey so far). A passkey signs in only at that relying party.
+    pub rp_id: String,
+    /// ★ Its PERSON's grant names (ledger #4305): grants live on the person, so every passkey
+    /// of one person holds the same list. The grant names — keys of `grants.json` — this passkey holds, in the order they were
     /// added, never empty. Its scopes are the union of theirs ([`scopes_of_all`]). A grant is
     /// shared by every passkey that holds it, so a passkey is WIDENED by adding a grant to its
     /// own list ([`Passkeys::add_grant`]), never by editing a shared grant (ledger
@@ -341,6 +485,7 @@ pub(crate) fn parse_passkeys(
     let map = map
         .as_object()
         .ok_or("`passkeys` in clients.json must be an object of credential id → entry")?;
+    let people = parse_people(doc)?;
     for (id, entry) in map {
         let field = |name: &str| {
             entry
@@ -349,12 +494,37 @@ pub(crate) fn parse_passkeys(
                 .map(str::to_string)
                 .ok_or_else(|| format!("passkey `{id}` has no `{name}`"))
         };
-        let grants = entry_grants(id, entry)?;
+        let (person, grants, label) = match entry.get("person") {
+            None | Some(Value::Null) => {
+                // An enrollment from before people (ledger #4305): its own person, carrying
+                // its grants, exactly as [`migrate_people`] writes it.
+                let grants = entry_grants(id, entry)?;
+                let label = field("label").unwrap_or_else(|_| grants[0].clone());
+                let pid = migrated_person_id(id);
+                // ★ Unless that person already exists (ledger #4368): an old-form entry put
+                // back by hand, or rewritten by an older gonk, holds its PERSON's grants, as
+                // the migration will make it, never a list of its own beside the person's.
+                let grants = people.get(&pid).map_or(grants, |p| p.grants.clone());
+                (person_iri(&pid), grants, label)
+            }
+            Some(Value::String(iri)) => {
+                let who = person_id(iri)
+                    .and_then(|pid| people.get(pid))
+                    .ok_or_else(|| {
+                        format!("passkey `{id}` names person `{iri}`, who is not in `people`")
+                    })?;
+                let label = field("label").unwrap_or_else(|_| who.label.clone());
+                (iri.clone(), who.grants.clone(), label)
+            }
+            Some(_) => return Err(format!("passkey `{id}`'s `person` must be a person IRI")),
+        };
         out.insert(
             id.clone(),
             Enrolled {
                 credential_id: id.clone(),
-                label: field("label").unwrap_or_else(|_| grants[0].clone()),
+                person,
+                rp_id: field("rp_id").unwrap_or_else(|_| RP_ID.to_string()),
+                label,
                 grants,
                 public_key: field("public_key")?,
                 sign_count: entry
@@ -368,8 +538,320 @@ pub(crate) fn parse_passkeys(
     Ok(out)
 }
 
+/// One person, as the `people` section of `clients.json` holds it (ledger #4305).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Person {
+    /// The person's label: what an author naming the person, or any of its passkeys, reads as.
+    pub label: String,
+    /// The grant names every passkey of this person holds, never empty.
+    pub grants: Vec<String>,
+}
+
+/// The `people` section of `clients.json`, by person id. Absent: none.
+pub(crate) fn parse_people(doc: &Map<String, Value>) -> Result<BTreeMap<String, Person>, String> {
+    let mut out = BTreeMap::new();
+    let Some(map) = doc.get("people") else {
+        return Ok(out);
+    };
+    let map = map
+        .as_object()
+        .ok_or("`people` in clients.json must be an object of person id → entry")?;
+    for (id, entry) in map {
+        let grants = entry_grants(id, entry).map_err(|e| e.replacen("passkey", "person", 1))?;
+        let label = entry
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| grants[0].clone());
+        out.insert(id.clone(), Person { label, grants });
+    }
+    Ok(out)
+}
+
+/// The file [`migrate_people`] keeps the pre-migration `clients.json` in.
+pub fn people_backup(layout: &Layout) -> std::path::PathBuf {
+    layout
+        .clients_json()
+        .with_file_name("clients.json.before-people")
+}
+
+/// What one [`migrate`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Migration {
+    /// How many passkey entries from before people now name a person.
+    pub migrated: usize,
+    /// The file holding `clients.json` as it was before them: [`people_backup`], or a
+    /// stamped `clients.json.before-people-<UTC>` beside it when that one already held an
+    /// older file (a re-upgrade after a rollback, ledger #4368). `None` when none migrated.
+    pub backup: Option<std::path::PathBuf>,
+    /// How many migrated entries' compatibility `grants` were rewritten to their person's.
+    pub mirrored: usize,
+}
+
+/// Give every enrollment from before people its person (ledger #4305), under the clients
+/// lock (`migrate_locked`). Returns how many passkeys were migrated.
+pub fn migrate_people(layout: &Layout) -> Result<usize, String> {
+    migrate(layout).map(|m| m.migrated)
+}
+
+/// [`migrate_people`], saying what it did and which backup holds the file before.
+pub fn migrate(layout: &Layout) -> Result<Migration, String> {
+    match std::fs::metadata(layout.clients_json()) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Migration::default()),
+        _ => {}
+    }
+    let lock = layout.lock_clients()?;
+    migrate_locked(layout, &lock)
+}
+
+/// The sentence a start (or a cli write) prints after a migration that did something.
+pub fn migration_line(layout: &Layout, done: &Migration) -> Option<String> {
+    let backup = done.backup.as_ref()?;
+    Some(format!(
+        "gonk: gave {} passkey(s) a person each in {} (the file before is {})",
+        done.migrated,
+        layout.clients_json().display(),
+        backup.display()
+    ))
+}
+
+/// Set a passkey entry's compatibility grants to its person's (ledger #4368): `grants`, and
+/// `grant` too when the person holds exactly one. This server ignores both on an entry that
+/// names a person; every gonk from before people reads them (ledger-v0.18.0 through v0.24.x
+/// read `grant`, v0.25.0 `grants`, refusing the two when they disagree), so a downgrade
+/// starts and signs each passkey in with its person's grants. Returns whether it changed.
+fn mirror_grants(object: &mut Map<String, Value>, grants: &[String]) -> bool {
+    let before = (object.get("grants").cloned(), object.get("grant").cloned());
+    object.insert("grants".to_string(), json!(grants));
+    match grants {
+        [one] => object.insert("grant".to_string(), Value::String(one.clone())),
+        _ => object.remove("grant"),
+    };
+    before != (object.get("grants").cloned(), object.get("grant").cloned())
+}
+
+/// Give every enrollment from before people its own person (ledger #4305): a new `people`
+/// entry carrying that passkey's label and grants, and `person` and `rp_id = "localhost"` on
+/// the passkey. Nothing is merged: two passkeys become two people, and `passkey attach` is how
+/// an operator makes them one. The new file is written whole and renamed into place. A file
+/// with nothing to change is not written, so a second run changes nothing.
+///
+/// ★ **The backup is always a file from before people** (ledger #4368). Every writer of
+/// `clients.json` runs this first, under the lock it holds, so no new-form entry is written
+/// before the first backup. The first is [`people_backup`], never overwritten; when it is
+/// there and differs from the file being migrated now (a rollback restored it, an older gonk
+/// changed it, and this is the re-upgrade), the file is kept as a stamped one beside it and
+/// that is the one [`Migration::backup`] names.
+///
+/// ★ **An old-form entry whose person already exists** (put back by hand from a backup, or
+/// written by `passkey attach` or an older gonk) is pointed at that person: its own grants are
+/// dropped, never copied over the person's, and a difference is reported.
+///
+/// ★ **Every migrated entry keeps its person's grants as `grants`** ([`mirror_grants`]), so
+/// an older gonk still starts on the file. A mirror that differs from its person's list is
+/// rewritten here, with a warning.
+pub(crate) fn migrate_locked(layout: &Layout, lock: &quic::FileLock) -> Result<Migration, String> {
+    let staged = Staged::read(layout, lock)?;
+    if !staged.due() {
+        return Ok(staged.done);
+    }
+    let doc = staged.doc.clone();
+    staged.commit(layout, doc)
+}
+
+/// `clients.json` read under the clients lock and migrated IN MEMORY ([`migrate_doc`]), not
+/// yet written (ledger #4432). A command validates itself against [`Staged::doc`], the file
+/// as the migration leaves it, and only a command that will succeed calls [`Staged::commit`]:
+/// ONE write of the file, the migration and the change together, with the pre-people backup
+/// taken just before it. A refusal returns before any write, so it leaves the file
+/// byte-identical and takes no backup.
+struct Staged {
+    /// The file as it is on disk; `None` when there is none.
+    before: Option<String>,
+    /// The file as the migration leaves it (unchanged when none is due).
+    doc: Map<String, Value>,
+    /// What the migration will have done once committed (no backup yet).
+    done: Migration,
+}
+
+impl Staged {
+    fn read(layout: &Layout, _lock: &quic::FileLock) -> Result<Staged, String> {
+        let path = layout.clients_json();
+        let before = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Staged {
+                    before: None,
+                    doc: Map::new(),
+                    done: Migration::default(),
+                })
+            }
+            Err(e) => return Err(format!("reading {}: {e}", path.display())),
+        };
+        let doc = quic::read_object(&path)?;
+        let (doc, done) = migrate_doc(&path, doc)?;
+        Ok(Staged {
+            before: Some(before),
+            doc,
+            done,
+        })
+    }
+
+    /// Whether the migration has anything to write.
+    fn due(&self) -> bool {
+        self.done.migrated > 0 || self.done.mirrored > 0
+    }
+
+    /// The enrolled passkeys of the migrated file, checked as [`checked_passkeys`] checks
+    /// the file on disk: the file as it is must parse as the QUIC door reads it.
+    fn checked_passkeys(&self, layout: &Layout) -> Result<BTreeMap<String, Enrolled>, String> {
+        let path = layout.clients_json();
+        if let Some(text) = &self.before {
+            quic::parse_enrolment(text).map_err(|e| format!("{}: {e}", path.display()))?;
+        }
+        parse_passkeys(&self.doc).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Write `doc` (the migrated file with the command's change) as the new `clients.json`:
+    /// checked first, then the pre-people backup when this write migrates, then the file.
+    fn commit(self, layout: &Layout, doc: Map<String, Value>) -> Result<Migration, String> {
+        let text = quic::pretty(&Value::Object(doc))?;
+        // What is written must still be what the QUIC door reads.
+        quic::parse_enrolment(&text)?;
+        let mut done = self.done;
+        if done.migrated > 0 {
+            if let Some(before) = &self.before {
+                done.backup = Some(people_backup_of(layout, before)?);
+            }
+        }
+        quic::write_private(&layout.clients_json(), &text)?;
+        Ok(done)
+    }
+}
+
+/// Keep `before` (the file from before people) as [`people_backup`], or as a stamped file
+/// beside it when that one already holds a different file. Returns the file it is in.
+fn people_backup_of(layout: &Layout, before: &str) -> Result<std::path::PathBuf, String> {
+    let first = people_backup(layout);
+    match std::fs::read_to_string(&first) {
+        Ok(kept) if kept == before => Ok(first),
+        Ok(_) => {
+            let stamp = crate::backup::stamp_compact(now_seconds() * 1000);
+            let mut fresh = first.with_file_name(format!("clients.json.before-people-{stamp}"));
+            let mut n = 1;
+            while fresh.exists() {
+                n += 1;
+                fresh = first.with_file_name(format!("clients.json.before-people-{stamp}-{n}"));
+            }
+            quic::write_private(&fresh, before)?;
+            Ok(fresh)
+        }
+        Err(_) => {
+            quic::write_private(&first, before)?;
+            Ok(first)
+        }
+    }
+}
+
+/// The migration [`migrate_locked`] describes, on `doc` in memory: returns the file as it
+/// leaves it and what it did. Writes nothing.
+fn migrate_doc(
+    path: &std::path::Path,
+    mut doc: Map<String, Value>,
+) -> Result<(Map<String, Value>, Migration), String> {
+    let enrolled = parse_passkeys(&doc)?;
+    let mut passkeys = match doc.remove("passkeys") {
+        Some(Value::Object(map)) => map,
+        other => {
+            if let Some(value) = other {
+                doc.insert("passkeys".to_string(), value);
+            }
+            return Ok((doc, Migration::default()));
+        }
+    };
+    let had_people = doc.contains_key("people");
+    let mut people = match doc.remove("people") {
+        None => Map::new(),
+        Some(Value::Object(map)) => map,
+        Some(_) => return Err("`people` in clients.json must be an object".to_string()),
+    };
+    let mut done = Migration::default();
+    let had_person: std::collections::BTreeSet<String> = passkeys
+        .iter()
+        .filter(|(_, entry)| entry.get("person").is_some_and(|p| !p.is_null()))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for (id, entry) in passkeys.iter_mut() {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        if object.get("person").is_some_and(|p| !p.is_null()) {
+            continue;
+        }
+        let e = &enrolled[id];
+        let pid = person_id(&e.person).unwrap_or_default().to_string();
+        if people.contains_key(&pid) {
+            // `e.grants` are already the person's (`parse_passkeys`); the entry's own are
+            // reported when they differ, then dropped.
+            let own = entry_grants(id, &Value::Object(object.clone())).unwrap_or_default();
+            if own != e.grants {
+                eprintln!(
+                    "ikigai-gonk: passkey `{id}` in {} was an entry from before people (put back \
+                     by hand, or written by an older gonk) whose person `{}` already exists: it \
+                     now names that person and holds its grants ({}); its own ({}) were dropped",
+                    path.display(),
+                    e.person,
+                    e.grant_names(),
+                    own.join(", ")
+                );
+            }
+        } else {
+            people.insert(pid, json!({ "label": e.label, "grants": e.grants }));
+        }
+        object.insert("person".to_string(), Value::String(e.person.clone()));
+        object.insert("rp_id".to_string(), Value::String(e.rp_id.clone()));
+        done.migrated += 1;
+    }
+    // The mirror on every entry naming a person, the just-migrated ones included.
+    let lists = parse_people(&Map::from_iter([(
+        "people".to_string(),
+        Value::Object(people.clone()),
+    )]))?;
+    for (id, entry) in passkeys.iter_mut() {
+        let Some(object) = entry.as_object_mut() else {
+            continue;
+        };
+        let Some(person) = object
+            .get("person")
+            .and_then(Value::as_str)
+            .and_then(person_id)
+            .and_then(|pid| lists.get(pid))
+        else {
+            continue;
+        };
+        let had = object.get("grants").cloned();
+        if mirror_grants(object, &person.grants) {
+            if had.is_some() && had_person.contains(id) {
+                eprintln!(
+                    "ikigai-gonk: passkey `{id}`'s `grants` in {} differed from its person's; \
+                     rewrote them to {} (only an older gonk reads them)",
+                    path.display(),
+                    person.grants.join(", ")
+                );
+            }
+            done.mirrored += 1;
+        }
+    }
+    if done.migrated > 0 || done.mirrored > 0 || had_people {
+        doc.insert("people".to_string(), Value::Object(people));
+    }
+    doc.insert("passkeys".to_string(), Value::Object(passkeys));
+    Ok((doc, done))
+}
+
 /// A passkey entry's grant names: the list form `"grants": ["a", "b"]` this server writes, or
-/// the single-name form `"grant": "a"` every earlier one wrote (still read, never written).
+/// the single-name form `"grant": "a"` every earlier one wrote (still read; written only as the
+/// mirror an older gonk reads, [`mirror_grants`]).
 /// Refused when it names none, when a name is not a string, or when both forms disagree.
 fn entry_grants(id: &str, entry: &Value) -> Result<Vec<String>, String> {
     let single = match entry.get("grant") {
@@ -411,27 +893,81 @@ fn entry_grants(id: &str, entry: &Value) -> Result<Vec<String>, String> {
 /// Write one passkey entry into `clients.json`, keeping every other key (the QUIC clients,
 /// the default) exactly as it was. The caller holds `_lock` from the read it decided on to
 /// here, so no other change to the file lands in between and is undone (ledger #2776).
-fn write_passkey(layout: &Layout, _lock: &quic::FileLock, entry: &Enrolled) -> Result<(), String> {
-    let mut doc = quic::read_object(&layout.clients_json())?;
+fn write_passkey(layout: &Layout, lock: &quic::FileLock, entry: &Enrolled) -> Result<(), String> {
+    // ★ The migration first, under this lock (ledger #4368), so the backup it keeps is the
+    // file from before people, never one this write already changed; and in the same write
+    // as the change (ledger #4432).
+    let staged = Staged::read(layout, lock)?;
+    write_staged(layout, staged, entry)
+}
+
+/// [`write_passkey`] on a file already [`Staged`]: the migration and this entry, one write.
+fn write_staged(layout: &Layout, staged: Staged, entry: &Enrolled) -> Result<(), String> {
+    let mut doc = staged.doc.clone();
+    put_passkey(&mut doc, entry)?;
+    committed_by_cli(layout, staged, doc)
+}
+
+/// Put one passkey entry, and its person's grants, into a `clients.json` document.
+fn put_passkey(doc: &mut Map<String, Value>, entry: &Enrolled) -> Result<(), String> {
     let mut passkeys = match doc.remove("passkeys") {
         None => Map::new(),
         Some(Value::Object(map)) => map,
         Some(_) => return Err("`passkeys` in clients.json must be an object".to_string()),
     };
+    let mut people = match doc.remove("people") {
+        None => Map::new(),
+        Some(Value::Object(map)) => map,
+        Some(_) => return Err("`people` in clients.json must be an object".to_string()),
+    };
+    let pid = person_id(&entry.person)
+        .ok_or_else(|| format!("passkey `{}` names no person", entry.label))?;
+    // ★ Grants are the person's (ledger #4305): writing this passkey's list writes its
+    // person's, which every other passkey of that person reads. The person's label stays.
+    let label = people
+        .get(pid)
+        .and_then(|p| p.get("label"))
+        .and_then(Value::as_str)
+        .unwrap_or(&entry.label)
+        .to_string();
+    people.insert(
+        pid.to_string(),
+        json!({ "label": label, "grants": entry.grants }),
+    );
     passkeys.insert(
         entry.credential_id.clone(),
         json!({
-            "grants": entry.grants,
+            "person": entry.person,
+            "rp_id": entry.rp_id,
             "label": entry.label,
             "public_key": entry.public_key,
             "sign_count": entry.sign_count,
         }),
     );
+    // Every passkey of the person keeps its grants as an older gonk reads them.
+    for other in passkeys.values_mut() {
+        if let Some(object) = other.as_object_mut() {
+            if object.get("person").and_then(Value::as_str) == Some(entry.person.as_str()) {
+                mirror_grants(object, &entry.grants);
+            }
+        }
+    }
+    doc.insert("people".to_string(), Value::Object(people));
     doc.insert("passkeys".to_string(), Value::Object(passkeys));
-    let text = quic::pretty(&Value::Object(doc))?;
-    // What is written must still be what the QUIC door reads.
-    quic::parse_enrolment(&text)?;
-    quic::write_private(&layout.clients_json(), &text)
+    Ok(())
+}
+
+/// [`Staged::commit`] from a writer, printing what the migration did as a start does.
+fn committed_by_cli(
+    layout: &Layout,
+    staged: Staged,
+    doc: Map<String, Value>,
+) -> Result<(), String> {
+    let done = staged.commit(layout, doc)?;
+    if let Some(line) = migration_line(layout, &done) {
+        eprintln!("{line}");
+    }
+    Ok(())
 }
 
 /// Which passkey `passkey revoke` names: its label (a display name, so possibly shared) or its
@@ -484,16 +1020,16 @@ pub fn checked_passkeys(layout: &Layout) -> Result<BTreeMap<String, Enrolled>, S
 /// happen; if it cannot be written the change stands and the error says so.
 pub fn revoke(layout: &Layout, which: Which<'_>, now_ms: u64) -> Result<Enrolled, String> {
     let lock = layout.lock_clients()?;
-    let target = pick(layout, which)?;
-    let mut doc = quic::read_object(&layout.clients_json())?;
+    // ★ Migrated in memory, checked, and written only if it will succeed (ledger #4432).
+    let staged = Staged::read(layout, &lock)?;
+    let target = pick_from(&staged.checked_passkeys(layout)?, which)?;
+    let mut doc = staged.doc.clone();
     let Some(Value::Object(mut passkeys)) = doc.remove("passkeys") else {
         return Err("`passkeys` in clients.json must be an object".to_string());
     };
     passkeys.remove(&target.credential_id);
     doc.insert("passkeys".to_string(), Value::Object(passkeys));
-    let text = quic::pretty(&Value::Object(doc))?;
-    quic::parse_enrolment(&text)?;
-    quic::write_private(&layout.clients_json(), &text)?;
+    committed_by_cli(layout, staged, doc)?;
     drop(lock);
     record(layout, REVOKED, &target, now_ms).map_err(|e| {
         format!(
@@ -544,7 +1080,9 @@ fn record(layout: &Layout, class: &str, target: &Enrolled, now_ms: u64) -> std::
 
 /// [`record`], with `extra` (` name=value` fields, each already [`encoded`]) at the end.
 /// `grant=` lists every grant the passkey holds, each encoded, joined by `,` (which
-/// [`encoded`] never leaves bare, so the list splits back unambiguously).
+/// [`encoded`] never leaves bare, so the list splits back unambiguously). A [`GRANT_ADDED`] or
+/// [`GRANT_REMOVED`] line ends with `person=<person IRI>` (ledger #4363): the grant list is
+/// the person's, so the change is every passkey of that person's.
 fn record_with(
     layout: &Layout,
     class: &str,
@@ -553,8 +1091,13 @@ fn record_with(
     extra: &str,
 ) -> std::io::Result<()> {
     let grants: Vec<String> = target.grants.iter().map(|g| encoded(g)).collect();
+    let person = if matches!(class, GRANT_ADDED | GRANT_REMOVED) {
+        format!(" person={}", encoded(&target.person))
+    } else {
+        String::new()
+    };
     let line = format!(
-        "{} {class} {} label={} grant={}{extra}\n",
+        "{} {class} {} label={} grant={}{extra}{person}\n",
         crate::backup::stamp_iso_ms(now_ms),
         passkey_iri(&target.credential_id),
         encoded(&target.label),
@@ -563,13 +1106,16 @@ fn record_with(
     append_line(&audit_log(layout), &line)
 }
 
-/// The class of the [`audit_log`] line [`Passkeys::add_grant`] writes: one passkey was
-/// WIDENED by an invite's grant. Its fields: `label`, `grant` (every grant it holds now),
-/// `added` (the one added) and `invite` (`sha256:<hex>` of the code, as `invites.json` keys
-/// it — never the code).
+/// The class of the [`audit_log`] line [`Passkeys::add_grant`] and [`add_grant`] write: a
+/// PERSON was widened by a grant, and with it every passkey of that person. It names the
+/// passkey the change was made through (the one that answered, or the one the owner named),
+/// then its fields: `label`, `grant` (every grant the person holds now), `added` (the one
+/// added), `invite` (`sha256:<hex>` of the code, as `invites.json` keys it — never the code;
+/// absent for the owner's), `by` (the owner's) and `person` (the person's IRI, ledger #4363).
 pub const GRANT_ADDED: &str = "gonk:PasskeyGrantAdded";
 
-/// The class of the [`audit_log`] line [`remove_grant`] writes; `removed` names the grant.
+/// The class of the [`audit_log`] line [`remove_grant`] writes: `removed` names the grant,
+/// taken off the PERSON `person` names, and so off every passkey of that person.
 pub const GRANT_REMOVED: &str = "gonk:PasskeyGrantRemoved";
 
 /// One grant change [`audit_log`] holds for a passkey: what `passkey list` prints under it.
@@ -588,6 +1134,9 @@ pub struct GrantChange {
     pub invite: Option<String>,
     /// Who made the change, when the line says (`by=`): [`BY_OWNER`] for [`add_grant`].
     pub by: Option<String>,
+    /// The person whose grants changed (`person=`, ledger #4363); `None` for a line written
+    /// before people, which changed the passkey alone.
+    pub person: Option<String>,
 }
 
 /// Every [`GRANT_ADDED`] and [`GRANT_REMOVED`] line in [`audit_log`], in the order written. No
@@ -627,19 +1176,22 @@ pub fn grant_changes(layout: &Layout) -> Result<Vec<GrantChange>, String> {
             grant,
             invite: field("invite=").map(str::to_string),
             by: field("by=").map(decoded),
+            person: field("person=").map(decoded),
         });
     }
     Ok(out)
 }
 
-/// Take ONE grant off ONE passkey in `clients.json` and append a [`GRANT_REMOVED`] line to
-/// [`audit_log`] — what `ikigai-gonk passkey remove-grant` runs (ledger
-/// [#3388](http://localhost:1062/l/default/item/3388)). Returns the passkey as it is now.
+/// Take ONE grant off the PERSON a passkey names in `clients.json` and append a
+/// [`GRANT_REMOVED`] line to [`audit_log`] — what `ikigai-gonk passkey remove-grant` runs
+/// (ledger [#3388](http://localhost:1062/l/default/item/3388)). The person is named through
+/// one of its passkeys. Returns that passkey as it is now.
 ///
-/// Only that passkey's list changes: every other passkey, the grant itself in `grants.json`
-/// (which others may hold) and the passkey's other grants are left exactly as they were. The
-/// LAST grant is refused — a passkey with none could never sign in; `passkey revoke` is the
-/// command for that. Checked before and after, as [`revoke`] is. Takes effect at the passkey's
+/// ★ Grants are the person's (ledger #4305), so the person's list changes, and with it what
+/// EVERY passkey of that person holds. Other people, the grant itself in `grants.json` (which
+/// others may hold) and the person's other grants are left exactly as they were. The LAST
+/// grant is refused — a person with none could never sign in; `passkey revoke` is the command
+/// for a passkey. Checked before and after, as [`revoke`] is. Takes effect at each passkey's
 /// next request, which re-reads `clients.json`.
 pub fn remove_grant(
     layout: &Layout,
@@ -648,7 +1200,8 @@ pub fn remove_grant(
     now_ms: u64,
 ) -> Result<Enrolled, String> {
     let lock = layout.lock_clients()?;
-    let mut target = pick(layout, which)?;
+    let staged = Staged::read(layout, &lock)?;
+    let mut target = pick_from(&staged.checked_passkeys(layout)?, which)?;
     if !target.grants.iter().any(|g| g == grant) {
         return Err(format!(
             "passkey `{}` does not hold grant `{grant}` (it holds {}); nothing was written",
@@ -664,7 +1217,7 @@ pub fn remove_grant(
         ));
     }
     target.grants.retain(|g| g != grant);
-    write_passkey(layout, &lock, &target)?;
+    write_staged(layout, staged, &target)?;
     drop(lock);
     record_with(
         layout,
@@ -688,21 +1241,24 @@ pub fn remove_grant(
 /// command line, widened the passkey; no invite was redeemed.
 pub const BY_OWNER: &str = "owner";
 
-/// Add ONE grant to ONE passkey in `clients.json` and append a [`GRANT_ADDED`] line to
-/// [`audit_log`] — what `ikigai-gonk passkey grant add` runs (ledger
+/// Add ONE grant to the PERSON a passkey names in `clients.json` and append a [`GRANT_ADDED`]
+/// line to [`audit_log`] — what `ikigai-gonk passkey grant add` runs (ledger
 /// [#3400](http://localhost:1062/l/default/item/3400)). Returns the passkey as it is now.
 ///
-/// The owner's half of [`Passkeys::add_grant`]: the passkey is named as [`revoke`] and
-/// [`remove_grant`] name one, and only its list grows. A grant `grants.json` does not define
-/// (or that resolves to no scopes, or to a refused token) is refused, and so is one the passkey
-/// already holds; nothing is written then. `grants.json` and every other passkey are unchanged.
+/// The owner's half of [`Passkeys::add_grant`]: the person is named through one of its
+/// passkeys, as [`revoke`] and [`remove_grant`] name one, and only the person's list grows —
+/// which every passkey of that person reads (ledger #4305). A grant `grants.json` does not
+/// define (or that resolves to no scopes, or to a refused token) is refused, and so is one the
+/// person already holds; nothing is written then. `grants.json` and every other person are
+/// unchanged.
 ///
 /// The line is the one an invite's widening writes, with `by=owner` where that one has
-/// `invite=sha256:…`, so a passkey's grant history stays in one place. As there, it is written
+/// `invite=sha256:…`, so a person's grant history stays in one place. As there, it is written
 /// under the clients lock with the change, and if it cannot be written the change is undone.
 ///
-/// ★ **No session is ended.** Takes effect at the passkey's next request, which re-reads
-/// `clients.json` ([`Passkeys::identity`]), so a live session simply holds the wider grant.
+/// ★ **No session is ended.** Takes effect at each of the person's passkeys' next request,
+/// which re-reads `clients.json` ([`Passkeys::identity`]), so a live session simply holds the
+/// wider grant.
 /// The invite path ends and re-establishes sessions because the one asking for the wider grant
 /// is whoever holds a session cookie and an invite link, so it demands a fresh assertion; here
 /// the one deciding is the owner of the box, who could as well have widened the grant itself,
@@ -715,7 +1271,8 @@ pub fn add_grant(
     now_ms: u64,
 ) -> Result<Enrolled, String> {
     let lock = layout.lock_clients()?;
-    let mut target = pick(layout, which)?;
+    let staged = Staged::read(layout, &lock)?;
+    let mut target = pick_from(&staged.checked_passkeys(layout)?, which)?;
     if target.grants.iter().any(|g| g == grant) {
         return Err(format!(
             "passkey `{}` already holds grant `{grant}` (it holds {}); nothing was written",
@@ -733,7 +1290,7 @@ pub fn add_grant(
     })?;
     let before = target.clone();
     target.grants.push(grant.to_string());
-    write_passkey(layout, &lock, &target)?;
+    write_staged(layout, staged, &target)?;
     let extra = format!(" added={} by={BY_OWNER}", encoded(grant));
     if let Err(e) = record_with(layout, GRANT_ADDED, &target, now_ms, &extra) {
         // ★ No widening goes unrecorded: undone, under the same lock.
@@ -749,9 +1306,104 @@ pub fn add_grant(
     Ok(target)
 }
 
+/// The person `key` names (ledger #4305): a person IRI (`urn:iki:gonk:person:id:…`, as
+/// `passkey list` prints it), or the label of exactly one person. Returns the IRI and the
+/// person.
+pub fn resolve_person(layout: &Layout, key: &str) -> Result<(String, Person), String> {
+    resolve_person_in(&quic::read_object(&layout.clients_json())?, key)
+}
+
+/// [`resolve_person`] in a `clients.json` document.
+fn resolve_person_in(doc: &Map<String, Value>, key: &str) -> Result<(String, Person), String> {
+    // Read through the passkeys too, so a person is found even in a file not yet migrated.
+    let mut people: BTreeMap<String, Person> = parse_people(doc)?
+        .into_iter()
+        .map(|(id, p)| (person_iri(&id), p))
+        .collect();
+    for e in parse_passkeys(doc)?.into_values() {
+        people.entry(e.person.clone()).or_insert(Person {
+            label: e.label.clone(),
+            grants: e.grants.clone(),
+        });
+    }
+    let key = key.trim();
+    if person_id(key).is_some() {
+        return people.remove_entry(key).ok_or_else(|| {
+            format!("no person is `{key}` — `ikigai-gonk passkey list` shows who there is")
+        });
+    }
+    let mut named: Vec<(String, Person)> =
+        people.into_iter().filter(|(_, p)| p.label == key).collect();
+    match named.len() {
+        1 => Ok(named.remove(0)),
+        0 => Err(format!(
+            "no person is labeled `{key}` — `ikigai-gonk passkey list` shows who there is"
+        )),
+        n => Err(format!(
+            "{n} people are labeled `{key}` ({}): name one by its IRI, and nothing was written",
+            named
+                .iter()
+                .map(|(iri, _)| iri.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// The class of the [`audit_log`] line [`attach`] writes.
+pub const ATTACHED: &str = "gonk:PasskeyAttached";
+
+/// Attach the enrolled passkey `which` names to the person `person` names ([`resolve_person`]),
+/// in place of the person it named — what `ikigai-gonk passkey attach` runs (ledger
+/// [#4305](http://localhost:1062/l/default/item/4305)), and how two passkeys enrolled as two
+/// people become one. The passkey then holds that person's grants, and its writes from now on
+/// are that person's. The person it named before is kept, with its label and grants, even when
+/// no passkey names it any more: the record still names it, and nothing can sign in as it.
+/// Takes effect at the passkey's next request, as [`add_grant`] does.
+pub fn attach(
+    layout: &Layout,
+    which: Which<'_>,
+    person: &str,
+    now_ms: u64,
+) -> Result<(Enrolled, String), String> {
+    let lock = layout.lock_clients()?;
+    let staged = Staged::read(layout, &lock)?;
+    let mut target = pick_from(&staged.checked_passkeys(layout)?, which)?;
+    let (iri, to) = resolve_person_in(&staged.doc, person)?;
+    if target.person == iri {
+        return Err(format!(
+            "passkey `{}` already names person `{}` ({iri}); nothing was written",
+            target.label, to.label
+        ));
+    }
+    let before = target.clone();
+    target.person = iri;
+    target.grants = to.grants;
+    write_staged(layout, staged, &target)?;
+    let extra = format!(
+        " person={} before={} by={BY_OWNER}",
+        encoded(&target.person),
+        encoded(&before.person)
+    );
+    if let Err(e) = record_with(layout, ATTACHED, &target, now_ms, &extra) {
+        write_passkey(layout, &lock, &before)?;
+        return Err(format!(
+            "passkey `{}` was NOT attached: its line could not be written to {}: {e}",
+            target.label,
+            audit_log(layout).display()
+        ));
+    }
+    drop(lock);
+    Ok((target, before.person))
+}
+
 /// The ONE enrolled passkey `which` names, from a file that is whole ([`checked_passkeys`]).
 fn pick(layout: &Layout, which: Which<'_>) -> Result<Enrolled, String> {
-    let enrolled = checked_passkeys(layout)?;
+    pick_from(&checked_passkeys(layout)?, which)
+}
+
+/// The ONE passkey of `enrolled` that `which` names.
+fn pick_from(enrolled: &BTreeMap<String, Enrolled>, which: Which<'_>) -> Result<Enrolled, String> {
     let matches: Vec<&Enrolled> = enrolled
         .values()
         .filter(|entry| match which {
@@ -878,6 +1530,42 @@ pub fn invite(
     Ok(code)
 }
 
+/// An invite that enrolls a new passkey of an EXISTING person (`passkey invite --person`,
+/// ledger #4305) instead of a person of its own: the enrollment names that person and holds
+/// its grants, at once. Returns the code, the person's IRI and the person. No grant is
+/// written; the invite records the person's first grant beside it, which is what an unlabeled
+/// enrollment is labeled and what the sign-in page shows.
+pub fn invite_person(
+    layout: &Layout,
+    person: &str,
+    minutes: u64,
+    now: u64,
+) -> Result<(String, String, Person), String> {
+    let (iri, who) = resolve_person(layout, person)?;
+    let code = random_b64(24)?;
+    let _lock = layout.lock_invites()?;
+    let mut doc = quic::read_object(&layout.invites_json())?;
+    doc.retain(|_, entry| entry.get("expires").and_then(Value::as_u64).unwrap_or(0) > now);
+    doc.insert(
+        sha256_hex(code.as_bytes()),
+        json!({ "grant": who.grants[0], "person": iri, "expires": now + minutes * 60 }),
+    );
+    quic::write_private(&layout.invites_json(), &quic::pretty(&Value::Object(doc))?)?;
+    Ok((code, iri, who))
+}
+
+/// The person an invite enrolls under ([`invite_person`]), read without redeeming it, or
+/// `None` for an invite that makes a person of its own.
+fn invite_person_of(layout: &Layout, code: &str) -> Result<Option<String>, String> {
+    let _lock = layout.lock_invites()?;
+    let doc = quic::read_object(&layout.invites_json())?;
+    Ok(doc
+        .get(&sha256_hex(code.as_bytes()))
+        .and_then(|entry| entry.get("person"))
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
 /// Consume an invite: its grant, if the code is live. Single use — removed on success, under
 /// the invites lock from the read to the rename, so no concurrent [`invite`] writes it back
 /// (ledger #2777). [`Passkeys::register`] calls this holding the clients lock, which is the
@@ -917,6 +1605,33 @@ fn invite_grant(layout: &Layout, code: &str) -> Result<String, String> {
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| "the invite names no grant".to_string())
+}
+
+/// Refuse redeeming a person's invite ([`invite_person`]) to widen a signed-in passkey: it
+/// enrolls a new passkey of that person, and widens nobody.
+fn refuse_person_invite(layout: &Layout, code: &str) -> Result<(), String> {
+    match invite_person_of(layout, code)? {
+        Some(iri) => Err(format!(
+            "this invite enrolls a new passkey of person {iri}, and adds no grant to one already \
+             enrolled — sign out and create the passkey with it; the invite is still good"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Refuse a passkey registered at a relying party other than the listener's own `site`
+/// (ledger #4305, #4367): a passkey is bound to the site it was made for, so the local listener
+/// takes only `localhost` passkeys and the public one only those registered at its host,
+/// whatever the signature says.
+fn refuse_other_rp(enrolled: &Enrolled, site: &Site) -> Result<(), String> {
+    if enrolled.rp_id != site.rp_id {
+        return Err(format!(
+            "passkey `{}` was registered for the site `{}`, and this page is `{}`: a \
+             passkey signs in only at the site it was registered for",
+            enrolled.label, enrolled.rp_id, site.rp_id
+        ));
+    }
+    Ok(())
 }
 
 /// Refuse adding `grant` to a passkey that already holds it: nothing would change, and the
@@ -1226,7 +1941,10 @@ struct Verified {
 /// The HTTP door's passkey relying party and session table.
 pub struct Passkeys {
     layout: Layout,
-    origin: String,
+    /// The local listener's site (`localhost`).
+    local: Site,
+    /// The public listener's site, when `gonk.http.public_origin` is set (ledger #4367).
+    public: Option<Site>,
     idle_seconds: u64,
     /// `gonk.http.session_max_hours`, in seconds: see [`Passkeys::lifetime`] and
     /// [`Passkeys::write_seconds`].
@@ -1265,6 +1983,55 @@ impl Identity {
     }
 }
 
+/// [`Passkeys::labels`], for a caller with a layout and no server: the CURRENT label of every
+/// person IRI and passkey IRI this config home names, each as its PERSON's label.
+pub fn author_labels(layout: &Layout) -> BTreeMap<String, String> {
+    let Ok(doc) = quic::read_object(&layout.clients_json()) else {
+        return BTreeMap::new();
+    };
+    let mut out: BTreeMap<String, String> = parse_people(&doc)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, p)| (person_iri(&id), p.label))
+        .collect();
+    for e in parse_passkeys(&doc).unwrap_or_default().into_values() {
+        let label = out.get(&e.person).cloned().unwrap_or(e.label);
+        out.entry(e.person.clone()).or_insert_with(|| label.clone());
+        out.insert(passkey_iri(&e.credential_id), label);
+    }
+    out
+}
+
+/// Every enrolled passkey's IRI and the person IRI it names now (ledger #4305): what a
+/// principal recorded before people ([`passkey_iri`]) is read as since. Read through the old
+/// form too, which names the person the migration writes ([`migrate_people`]).
+pub fn passkey_people(layout: &Layout) -> Result<BTreeMap<String, String>, String> {
+    Ok(read_passkeys(layout)?
+        .into_values()
+        .map(|e| (passkey_iri(&e.credential_id), e.person))
+        .collect())
+}
+
+/// The principals `principal` was known by before people (ledger #4305): for a person IRI,
+/// the [`passkey_iri`] of each passkey that names it; nothing for any other principal. What a
+/// dispatcher cursor kept under a passkey IRI is adopted through
+/// ([`crate::dispatch::space_with_former`]).
+pub fn former_principals(layout: &Layout, principal: &str) -> Vec<String> {
+    if person_id(principal).is_none() {
+        return Vec::new();
+    }
+    layout
+        .current_passkeys()
+        .map(|enrolled| {
+            enrolled
+                .values()
+                .filter(|e| e.person == principal)
+                .map(|e| passkey_iri(&e.credential_id))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 impl Passkeys {
     /// A relying party for the page served at `http://localhost:{port}`, with the
     /// [`DEFAULT_IDLE_SECONDS`] idle bound, a [`SESSION_SECONDS`] lifetime and no audit lines,
@@ -1281,6 +2048,16 @@ impl Passkeys {
     /// written while no server ran still ends what it names. (A log now shorter than that was
     /// replaced, and is read from its start, which can only end sessions.)
     pub fn new_at(layout: Layout, port: u16, now: u64) -> Passkeys {
+        // ★ Enrollments from before people get theirs now (ledger #4305). A file this cannot
+        // migrate is read as it is (`parse_passkeys` reads the old form) and reported here.
+        match migrate(&layout) {
+            Ok(done) => {
+                if let Some(line) = migration_line(&layout, &done) {
+                    eprintln!("{line}");
+                }
+            }
+            Err(e) => eprintln!("gonk: passkeys were not given people: {e}"),
+        }
         let log_len = std::fs::metadata(audit_log(&layout))
             .map(|m| m.len())
             .unwrap_or(0);
@@ -1298,7 +2075,8 @@ impl Passkeys {
         };
         let passkeys = Passkeys {
             layout,
-            origin: format!("http://localhost:{port}"),
+            local: Site::local(port),
+            public: None,
             idle_seconds: DEFAULT_IDLE_SECONDS,
             max_seconds: SESSION_SECONDS,
             audit: None,
@@ -1400,8 +2178,15 @@ impl Passkeys {
         // names the credential it CLAIMED, and nobody. It is built from the whole id, never
         // the cut `passkey` column, so it is the IRI the door lines of the same session carry
         // (ledger #3414); an enrolled id always fits one ([`principal_refusal`]).
+        // ★ The PERSON the passkey names (ledger #4305), as the door stamps it; a passkey
+        // no longer enrolled is named by its own IRI.
         let principal = match line.credential {
-            Some(id) if line.authenticated => passkey_iri(id),
+            Some(id) if line.authenticated => self
+                .layout
+                .current_passkeys()
+                .ok()
+                .and_then(|enrolled| enrolled.get(id).map(|e| e.person.clone()))
+                .unwrap_or_else(|| passkey_iri(id)),
             _ => ikigai_log::ANONYMOUS_PRINCIPAL.to_string(),
         };
         let mut entry = ikigai_log::Entry::new(
@@ -1512,9 +2297,25 @@ impl Passkeys {
         invite_grant(&self.layout, invite)
     }
 
-    /// The only origin a ceremony is accepted from.
+    /// The only origin a ceremony at the LOCAL listener is accepted from.
     pub fn origin(&self) -> &str {
-        &self.origin
+        &self.local.origin
+    }
+
+    /// The local listener's site.
+    pub fn local_site(&self) -> &Site {
+        &self.local
+    }
+
+    /// The public listener's site, if one is configured.
+    pub fn public_site(&self) -> Option<&Site> {
+        self.public.as_ref()
+    }
+
+    /// This relying party, also serving the public listener at `site` (ledger #4367).
+    pub fn with_public_site(mut self, site: Site) -> Passkeys {
+        self.public = Some(site);
+        self
     }
 
     /// How many passkeys are enrolled (for the banner). An unreadable file counts as none
@@ -1532,14 +2333,14 @@ impl Passkeys {
         read_passkeys(&self.layout).is_ok_and(|enrolled| enrolled.is_empty())
     }
 
-    /// Every enrolled passkey's CURRENT label, by credential id — what a page renders a
-    /// [`passkey_iri`] author as. Re-read from `clients.json` on every call, like every
+    /// The CURRENT label of every author IRI this server names, keyed by the IRI: each
+    /// [`person_iri`] and each enrolled [`passkey_iri`], both as their PERSON's label (ledger
+    /// #4305), so an author written before people existed (a passkey IRI) and one written
+    /// since (a person IRI) read alike — what a page renders an author as. Re-read from `clients.json` on every call, like every
     /// other use of that file, so a relabel shows on the next request; an unreadable file
     /// is an empty map here, and a caller falls back to the IRI's tail.
     pub fn labels(&self) -> BTreeMap<String, String> {
-        read_passkeys(&self.layout)
-            .map(|m| m.into_iter().map(|(id, e)| (id, e.label)).collect())
-            .unwrap_or_default()
+        author_labels(&self.layout)
     }
 
     /// A fresh single-use challenge, base64url: a random nonce, `purpose` and the expiry,
@@ -1620,6 +2421,12 @@ impl Passkeys {
     /// Finish a registration. The body is the page's JSON:
     /// `{challenge, invite, id, publicKey, clientDataJSON, label?}` (byte fields base64url).
     pub fn register(&self, body: &[u8], now: u64) -> Result<Enrolled, String> {
+        self.register_at(&self.local.clone(), body, now)
+    }
+
+    /// [`Passkeys::register`] at `site`, the listener the ceremony ran at: its origin is the
+    /// one accepted, and the passkey records its relying party (ledger #4367).
+    pub fn register_at(&self, site: &Site, body: &[u8], now: u64) -> Result<Enrolled, String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
         let text = |name: &str| {
             v.get(name)
@@ -1630,7 +2437,7 @@ impl Passkeys {
         let challenge = text("challenge")?;
         let expires = self.check_challenge(&challenge, Purpose::Register, now)?;
         let client_data = b64(&text("clientDataJSON")?, "clientDataJSON")?;
-        self.check_client_data(&client_data, "webauthn.create", &challenge)?;
+        self.check_client_data(site, &client_data, "webauthn.create", &challenge)?;
         let id = text("id")?;
         if let Some(why) = principal_refusal(&id) {
             return Err(why);
@@ -1660,13 +2467,25 @@ impl Passkeys {
         refuse_taken_label(&enrolled, &label)?;
         // The invite is redeemed LAST, after everything that could refuse the credential:
         // a malformed key or a taken label must not burn a single-use code.
+        // ★ An invite made for a person (ledger #4305) binds this passkey to that person, who
+        // must still be there, and it holds that person's grants from its first request.
+        let person = match invite_person_of(&self.layout, &invite)? {
+            Some(iri) => Some(resolve_person(&self.layout, &iri)?),
+            None => None,
+        };
         let grant = redeem(&self.layout, &invite, now)?;
         scopes_of(&self.layout, &grant)?;
         // Answered only now that an invite was spent on it ([`MAX_PENDING`]).
         self.answer_challenge(&challenge, expires, now)?;
+        let (person, grants) = match person {
+            Some((iri, who)) => (iri, who.grants),
+            None => (person_iri(&new_person_id()?), vec![grant]),
+        };
         let entry = Enrolled {
             credential_id: id,
-            grants: vec![grant],
+            person,
+            rp_id: site.rp_id.clone(),
+            grants,
             label,
             public_key: URL_SAFE_NO_PAD.encode(&key),
             sign_count: 0,
@@ -1681,7 +2500,17 @@ impl Passkeys {
     /// Writes one `gonk:Login` line either way: `outcome=ok` naming the passkey, or
     /// `outcome=denied` naming the credential the body claimed and no principal.
     pub fn login(&self, body: &[u8], now: u64) -> Result<(String, Identity), String> {
-        let answer = self.sign_in(body, now);
+        self.login_at(&self.local.clone(), body, now)
+    }
+
+    /// [`Passkeys::login`] at `site`: only a passkey registered at its relying party signs in.
+    pub fn login_at(
+        &self,
+        site: &Site,
+        body: &[u8],
+        now: u64,
+    ) -> Result<(String, Identity), String> {
+        let answer = self.sign_in(site, body, now);
         let claimed = serde_json::from_slice::<Value>(body)
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
@@ -1700,9 +2529,9 @@ impl Passkeys {
         answer
     }
 
-    fn sign_in(&self, body: &[u8], now: u64) -> Result<(String, Identity), String> {
+    fn sign_in(&self, site: &Site, body: &[u8], now: u64) -> Result<(String, Identity), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
-        let verified = self.verify_assertion(&v, Purpose::Login, now)?;
+        let verified = self.verify_assertion(site, &v, Purpose::Login, now)?;
         // Answered only now that a passkey signed it ([`MAX_PENDING`]).
         self.answer_challenge(&verified.challenge, verified.expires, now)?;
         // ★ Decided again under the lock, against the file as it is NOW: a `passkey revoke`
@@ -1727,7 +2556,13 @@ impl Passkeys {
     /// clientDataJSON, signature}`) against the enrolled key: the challenge sealed here for
     /// `purpose`, this origin and RP ID, user verification REQUIRED. Answers nothing and writes
     /// nothing: the caller marks the challenge answered once it acts on it.
-    fn verify_assertion(&self, v: &Value, purpose: Purpose, now: u64) -> Result<Verified, String> {
+    fn verify_assertion(
+        &self,
+        site: &Site,
+        v: &Value,
+        purpose: Purpose,
+        now: u64,
+    ) -> Result<Verified, String> {
         let text = |name: &str| {
             v.get(name)
                 .and_then(Value::as_str)
@@ -1740,6 +2575,7 @@ impl Passkeys {
         let enrolled = read_passkeys(&self.layout)?
             .remove(&id)
             .ok_or("this passkey is not enrolled on this server")?;
+        refuse_other_rp(&enrolled, site)?;
         let credential = RegisteredCredential::from_spki_der(
             b64(&id, "id")?,
             &b64(&enrolled.public_key, "public_key")?,
@@ -1760,8 +2596,8 @@ impl Passkeys {
                 signature: &signature,
             },
             &Policy {
-                rp_id: RP_ID,
-                origin: &self.origin,
+                rp_id: &site.rp_id,
+                origin: &site.origin,
                 challenge_b64url: &challenge,
                 require_user_verified: true,
             },
@@ -1821,10 +2657,10 @@ impl Passkeys {
     }
 
     /// What redeeming `invite` while signed in with the session `token` would add, spending
-    /// nothing: the grant, and the credential id of the passkey it would be added to (so the
-    /// page can ask the authenticator for that passkey only). Refused, before any ceremony,
-    /// when `token` is no live session, the invite is not valid, or the passkey already holds
-    /// the grant.
+    /// nothing: the grant, and the credential id of the passkey that session signs in with
+    /// (so the page can ask the authenticator for that passkey only). The grant would be added
+    /// to that passkey's PERSON. Refused, before any ceremony, when `token` is no live session,
+    /// the invite is not valid, or the person already holds the grant.
     pub fn add_grant_preview(
         &self,
         token: &str,
@@ -1844,50 +2680,67 @@ impl Passkeys {
         let who = self.signed_in(signed_in, now).ok_or(
             "you are not signed in — sign in first, or create a new passkey with the invite",
         )?;
+        refuse_person_invite(&self.layout, invite)?;
         let grant = invite_grant(&self.layout, invite)?;
         refuse_held(&who.enrolled, &grant)?;
         Ok((grant, who.enrolled.credential_id))
     }
 
-    /// Redeem an invite while signed in by ADDING its grant to the signed-in passkey (ledger
-    /// [#3388](http://localhost:1062/l/default/item/3388)), instead of enrolling a new one. The
-    /// body: `{session, invite, challenge, id, authenticatorData, clientDataJSON, signature}`,
-    /// the last five a FRESH `navigator.credentials.get` answer to an [`Purpose::AddGrant`]
-    /// challenge. Returns a new session token (the only copy), the identity as it is now, and
-    /// the grant added.
+    /// Redeem an invite while signed in by ADDING its grant to the signed-in PERSON (ledger
+    /// [#3388](http://localhost:1062/l/default/item/3388), #4305), instead of enrolling a new
+    /// passkey. The body: `{session, invite, challenge, id, authenticatorData, clientDataJSON,
+    /// signature}`, the last five a FRESH `navigator.credentials.get` answer to an
+    /// [`Purpose::AddGrant`] challenge. Returns a new session token (the only copy), the
+    /// identity as it is now, and the grant added.
     ///
     /// ★ **A session alone is not enough.** The assertion must be signed, with user
-    /// verification, by the very passkey `session` signs in as, so a stolen cookie plus an
-    /// invite link cannot raise its own access: it would need the authenticator and the person's
-    /// biometric or PIN too.
+    /// verification, by a passkey of the same PERSON as the one `session` signs in with (that
+    /// passkey or another of the person's devices), so a stolen cookie plus an invite link
+    /// cannot raise its own access: it would need one of the person's authenticators and their
+    /// biometric or PIN too. A passkey of another person is refused.
     ///
-    /// ★ **Only this passkey widens.** The grant is appended to THIS passkey's list in
-    /// `clients.json`; no grant in `grants.json` is edited, so every other passkey keeps exactly
-    /// what it had, including one enrolled under a grant this one also holds.
+    /// ★ **The person widens, and only the person.** The grant is appended to the PERSON's
+    /// list in `clients.json`, so every passkey of that person holds it; no grant in
+    /// `grants.json` is edited, so every other person keeps exactly what they had, including
+    /// one enrolled under a grant this person also holds.
     ///
-    /// ★ **The session is ended and re-established**, not refreshed: every session of the
-    /// passkey (in this browser and any other) is DELETED, and one new session is opened from
-    /// the fresh assertion, so the only session carrying the wider grant is the one whose holder
-    /// just proved the passkey. Its lifetime is decided anew by the wider scopes. They are
-    /// deleted BEFORE the wider grant is written (ledger #3413), so none reads it in the
-    /// meantime; a widening refused after that point leaves the passkey signed out.
+    /// ★ **The sessions are ended and re-established**, not refreshed: every session of every
+    /// passkey of the person (in this browser and any other device) is DELETED, and one new
+    /// session is opened from the fresh assertion, for the passkey that answered, so the only
+    /// session carrying the wider grant is the one whose holder just proved a passkey of the
+    /// person. Its lifetime is decided anew by the wider scopes. They are deleted BEFORE the
+    /// wider grant is written (ledger #3413), so none reads it in the meantime; a widening
+    /// refused after that point leaves the person signed out everywhere.
     ///
-    /// Every widening appends a [`GRANT_ADDED`] line to [`audit_log`] naming the passkey, the
-    /// grant and the invite (by its hash), under the clients lock with the change: if the line
-    /// cannot be written the change is undone and refused, so no widening is unrecorded.
+    /// Every widening appends a [`GRANT_ADDED`] line to [`audit_log`] naming the passkey that
+    /// answered, the person, the grant and the invite (by its hash), under the clients lock with
+    /// the change: if the line cannot be written the change is undone and refused, so no
+    /// widening is unrecorded.
     pub fn add_grant(&self, body: &[u8], now: u64) -> Result<(String, Identity, String), String> {
-        self.add_grant_as(body, None, now)
+        self.add_grant_as(body, SignedIn::Principal(None), now)
     }
 
-    /// [`Passkeys::add_grant`], where a body with no `session` is signed in as `principal`
-    /// (the HTTP door's, from the HttpOnly cookie the page cannot read).
+    /// [`Passkeys::add_grant`], where a body with no `session` is signed in as `door` says
+    /// (the HTTP door's request: its session key and principal, from the HttpOnly cookie the
+    /// page cannot read).
     pub fn add_grant_as(
         &self,
         body: &[u8],
-        principal: Option<&str>,
+        door: SignedIn<'_>,
         now: u64,
     ) -> Result<(String, Identity, String), String> {
-        let answer = self.widen(body, principal, now);
+        self.add_grant_at(&self.local.clone(), body, door, now)
+    }
+
+    /// [`Passkeys::add_grant_as`] at `site`, the listener the assertion ran at.
+    pub fn add_grant_at(
+        &self,
+        site: &Site,
+        body: &[u8],
+        door: SignedIn<'_>,
+        now: u64,
+    ) -> Result<(String, Identity, String), String> {
+        let answer = self.widen(site, body, door, now);
         let claimed = serde_json::from_slice::<Value>(body)
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
@@ -1908,8 +2761,9 @@ impl Passkeys {
 
     fn widen(
         &self,
+        site: &Site,
         body: &[u8],
-        principal: Option<&str>,
+        door: SignedIn<'_>,
         now: u64,
     ) -> Result<(String, Identity, String), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
@@ -1923,16 +2777,18 @@ impl Passkeys {
         let invite = text("invite")?;
         let signed_in = match token.as_deref() {
             Some(token) => SignedIn::Token(token.trim()),
-            None => SignedIn::Principal(principal),
+            None => door,
         };
         let who = self.signed_in(signed_in, now).ok_or(
             "you are not signed in — sign in first, or create a new passkey with the invite",
         )?;
-        let verified = self.verify_assertion(&v, Purpose::AddGrant, now)?;
-        if verified.enrolled.credential_id != who.enrolled.credential_id {
+        let verified = self.verify_assertion(site, &v, Purpose::AddGrant, now)?;
+        // ★ The same PERSON (ledger #4305): a grant is added to the person, so any of its
+        // passkeys may answer for it, whichever of them the session was opened with.
+        if verified.enrolled.person != who.enrolled.person {
             return Err(format!(
-                "the passkey that answered is not the one you are signed in with (`{}`); the \
-                 invite is still good",
+                "the passkey that answered is not a passkey of the person you are signed in as \
+                 (`{}`); the invite is still good",
                 who.enrolled.label
             ));
         }
@@ -1943,6 +2799,7 @@ impl Passkeys {
             .ok_or("this passkey is not enrolled on this server")?;
         // Everything that could refuse comes before the invite is spent: a grant already held
         // or one that does not resolve must not burn a single-use code.
+        refuse_person_invite(&self.layout, &invite)?;
         let grant = invite_grant(&self.layout, &invite)?;
         refuse_held(&current, &grant)?;
         scopes_of(&self.layout, &grant)?;
@@ -1954,24 +2811,32 @@ impl Passkeys {
         // `clients.json` and then finds its session gone, so no session but the fresh one below
         // ever reads the wider grant, even while the line is written or the change undone
         // (ledger #3413).
-        let ended = {
-            let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
-            let ended = state.end_sessions(&current.credential_id);
-            self.save(&mut state);
-            ended
-        };
-        self.audit(
-            LOGOUT_CLASS,
-            AuditLine {
-                op: "session",
-                door: "http",
-                outcome: "ok",
-                credential: Some(&current.credential_id),
-                authenticated: true,
-                sessions: ended,
-                why: Some("widened"),
-            },
-        );
+        // ★ And every session of every OTHER passkey of this person (ledger #4305): the grant
+        // is the person's, so each of them would read it.
+        let mut credentials = self.credentials_of(&current.person);
+        if !credentials.contains(&current.credential_id) {
+            credentials.push(current.credential_id.clone());
+        }
+        for credential in &credentials {
+            let ended = {
+                let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
+                let ended = state.end_sessions(credential);
+                self.save(&mut state);
+                ended
+            };
+            self.audit(
+                LOGOUT_CLASS,
+                AuditLine {
+                    op: "session",
+                    door: "http",
+                    outcome: "ok",
+                    credential: Some(credential),
+                    authenticated: true,
+                    sessions: ended,
+                    why: Some("widened"),
+                },
+            );
+        }
         let before = current.clone();
         current.grants.push(redeemed.clone());
         current.sign_count = current.sign_count.max(verified.count);
@@ -1999,41 +2864,54 @@ impl Passkeys {
     /// The session a re-assertion replaces, as its key in [`State::sessions`] (the SHA-256 of
     /// its token): the token's when `token` is given; else, for the HTTP door (whose page cannot
     /// read its HttpOnly cookie), `session_id` — the non-secret [`session_id`] the sign-in
-    /// answered — which must be a session of the passkey `principal` names; with neither, that
-    /// passkey's only live session. Never a guess between two.
+    /// answered — which must be a session of a passkey the door's principal stands for; with
+    /// neither, the request's own session ([`SignedIn::Session`], ledger #4363), or for a
+    /// caller with a principal only, that principal's only live session. Never a guess
+    /// between two.
     fn reassert_target(
         &self,
         token: Option<&str>,
         session_id: Option<&str>,
-        principal: Option<&str>,
+        door: SignedIn<'_>,
     ) -> Result<String, String> {
         let not_signed_in = || "you are not signed in — sign in first".to_string();
         if let Some(token) = token {
             return Ok(sha256_hex(token.trim().as_bytes()));
         }
-        let credential = principal
-            .and_then(|p| p.strip_prefix(PASSKEY_IRI_PREFIX))
+        if let SignedIn::Token(token) = door {
+            return Ok(sha256_hex(token.trim().as_bytes()));
+        }
+        let credentials = door
+            .principal()
+            .map(|p| self.credentials_of(p))
+            .filter(|c| !c.is_empty())
             .ok_or_else(not_signed_in)?;
         let mut state = self.state.lock().map_err(|_| "passkey state poisoned")?;
         self.read_log(&mut state);
         let mine: Vec<&String> = state
             .sessions
             .iter()
-            .filter(|(_, s)| s.credential_id == credential)
+            .filter(|(_, s)| credentials.contains(&s.credential_id))
             .map(|(key, _)| key)
             .collect();
-        match session_id {
-            Some(id) => mine
+        match (session_id, door) {
+            (Some(id), _) => mine
                 .into_iter()
                 .find(|key| key.as_str() == id.trim())
                 .cloned()
-                .ok_or_else(|| "that session is not one of this passkey's live sessions".into()),
-            None => match mine.as_slice() {
+                .ok_or_else(|| "that session is not one of your live sessions".into()),
+            // ★ The request's own session, whatever other device of the person is signed in.
+            (None, SignedIn::Session { key, .. }) => mine
+                .into_iter()
+                .find(|mine| mine.as_str() == key)
+                .cloned()
+                .ok_or_else(not_signed_in),
+            (None, _) => match mine.as_slice() {
                 [only] => Ok((*only).clone()),
                 [] => Err(not_signed_in()),
                 _ => Err(
-                    "this passkey has more than one session; name this one by its \
-                          `sessionId`, or sign in again"
+                    "you have more than one session; name this one by its `sessionId`, or \
+                     sign in again"
                         .to_string(),
                 ),
             },
@@ -2047,10 +2925,10 @@ impl Passkeys {
         &self,
         token: Option<&str>,
         session_id: Option<&str>,
-        principal: Option<&str>,
+        door: SignedIn<'_>,
         now: u64,
     ) -> Result<(String, String), String> {
-        let key = self.reassert_target(token, session_id, principal)?;
+        let key = self.reassert_target(token, session_id, door)?;
         let who = self
             .identity_at(key, now)
             .ok_or("you are not signed in — sign in first")?;
@@ -2063,8 +2941,8 @@ impl Passkeys {
     /// authenticatorData, clientDataJSON, signature}`, the last five a fresh
     /// `navigator.credentials.get` answer to a [`Purpose::Reassert`] challenge. It replaces the
     /// session `session` (a token) names; else the one `sessionId` ([`session_id`]) names, of
-    /// the passkey `principal` names; else that passkey's only session. Returns the new token
-    /// (the only copy) and the identity.
+    /// a passkey the door's principal stands for; else the request's own session (`door`,
+    /// [`SignedIn::Session`]). Returns the new token (the only copy) and the identity.
     ///
     /// ★ **The same passkey, verified as a sign-in is.** The assertion must be by the
     /// passkey the session signs in as, with user verification, and its signature counter is
@@ -2079,10 +2957,21 @@ impl Passkeys {
     pub fn reassert(
         &self,
         body: &[u8],
-        principal: Option<&str>,
+        door: SignedIn<'_>,
         now: u64,
     ) -> Result<(String, Identity), String> {
-        let answer = self.reassert_session(body, principal, now);
+        self.reassert_at(&self.local.clone(), body, door, now)
+    }
+
+    /// [`Passkeys::reassert`] at `site`, the listener the assertion ran at.
+    pub fn reassert_at(
+        &self,
+        site: &Site,
+        body: &[u8],
+        door: SignedIn<'_>,
+        now: u64,
+    ) -> Result<(String, Identity), String> {
+        let answer = self.reassert_session(site, body, door, now);
         let claimed = serde_json::from_slice::<Value>(body)
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
@@ -2103,17 +2992,18 @@ impl Passkeys {
 
     fn reassert_session(
         &self,
+        site: &Site,
         body: &[u8],
-        principal: Option<&str>,
+        door: SignedIn<'_>,
         now: u64,
     ) -> Result<(String, Identity), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
         let field = |name: &str| v.get(name).and_then(Value::as_str);
-        let key = self.reassert_target(field("session"), field("sessionId"), principal)?;
+        let key = self.reassert_target(field("session"), field("sessionId"), door)?;
         let who = self
             .identity_at(key.clone(), now)
             .ok_or("you are not signed in — sign in first")?;
-        let verified = self.verify_assertion(&v, Purpose::Reassert, now)?;
+        let verified = self.verify_assertion(site, &v, Purpose::Reassert, now)?;
         if verified.enrolled.credential_id != who.enrolled.credential_id {
             return Err(format!(
                 "the passkey that answered is not the one you are signed in with (`{}`)",
@@ -2210,14 +3100,55 @@ impl Passkeys {
         Some(ended)
     }
 
-    /// The identity [`SignedIn`] names, re-resolved now.
+    /// The identity [`SignedIn`] names, re-resolved now. Only the one session it names has
+    /// its idle clock restarted.
     pub fn signed_in(&self, who: SignedIn<'_>, now: u64) -> Option<Identity> {
         match who {
             SignedIn::Token(token) => self.identity(token, now),
             SignedIn::Principal(principal) => {
-                self.identity_of(principal?.strip_prefix(PASSKEY_IRI_PREFIX)?, now)
+                self.identity_of_any(&self.credentials_of(principal?), now)
+            }
+            SignedIn::Session { key, principal } => {
+                let credentials = principal.map(|p| self.credentials_of(p));
+                let credential = self.session_credential(key)?;
+                // The door stamped the principal from the same cookie, so they agree; if they
+                // ever did not, the request names nobody rather than a session it is not.
+                if credentials.is_some_and(|c| !c.contains(&credential)) {
+                    return None;
+                }
+                self.identity_at(key.to_string(), now)
             }
         }
+    }
+
+    /// The credential id of the live session stored under `key`, without touching it.
+    fn session_credential(&self, key: &str) -> Option<String> {
+        let mut state = self.state.lock().ok()?;
+        self.read_log(&mut state);
+        state.sessions.get(key).map(|s| s.credential_id.clone())
+    }
+
+    /// The credential ids a door's principal stands for (ledger #4305): the one passkey a
+    /// [`passkey_iri`] names (a session restored from before people), or every enrolled
+    /// passkey of the person a [`person_iri`] names, as the door now stamps. Empty for any
+    /// other principal, or a person no passkey names any more.
+    pub fn credentials_of(&self, principal: &str) -> Vec<String> {
+        if let Some(credential) = passkey_credential(principal) {
+            return vec![credential.to_string()];
+        }
+        if person_id(principal).is_none() {
+            return Vec::new();
+        }
+        self.layout
+            .current_passkeys()
+            .map(|enrolled| {
+                enrolled
+                    .values()
+                    .filter(|e| e.person == principal)
+                    .map(|e| e.credential_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The identity behind a session token, re-resolved NOW: a session whose passkey was
@@ -2237,13 +3168,19 @@ impl Passkeys {
     /// cookie is HttpOnly and the door has already named the passkey from it (the
     /// capability's principal, [`passkey_iri`]).
     pub fn identity_of(&self, credential_id: &str, now: u64) -> Option<Identity> {
+        self.identity_of_any(&[credential_id.to_string()], now)
+    }
+
+    /// [`Passkeys::identity_of`] over several passkeys — a person's ([`Passkeys::credentials_of`]):
+    /// the newest live session of any of them.
+    pub fn identity_of_any(&self, credential_ids: &[String], now: u64) -> Option<Identity> {
         let mut keys: Vec<(u64, String)> = {
             let mut state = self.state.lock().ok()?;
             self.read_log(&mut state);
             state
                 .sessions
                 .iter()
-                .filter(|(_, s)| s.credential_id == credential_id)
+                .filter(|(_, s)| credential_ids.contains(&s.credential_id))
                 .map(|(key, s)| (s.issued, key.clone()))
                 .collect()
         };
@@ -2392,19 +3329,26 @@ impl Passkeys {
         })
     }
 
-    fn check_client_data(&self, bytes: &[u8], kind: &str, challenge: &str) -> Result<(), String> {
+    fn check_client_data(
+        &self,
+        site: &Site,
+        bytes: &[u8],
+        kind: &str,
+        challenge: &str,
+    ) -> Result<(), String> {
         let v: Value =
             serde_json::from_slice(bytes).map_err(|_| "clientDataJSON is not JSON".to_string())?;
         let field = |name: &str| v.get(name).and_then(Value::as_str).unwrap_or_default();
         if field("type") != kind {
             return Err(format!("clientDataJSON is not a `{kind}` ceremony"));
         }
-        if field("origin") != self.origin {
+        if field("origin") != site.origin {
             return Err(format!(
-                "the ceremony ran at `{}`, and this server accepts only `{}` — open the page \
-                 through `localhost`, not an IP address",
+                "the ceremony ran at `{}`, and this page accepts only `{}` — open the page \
+                 through `localhost` (or the configured `gonk.http.public_origin`), not an IP \
+                 address",
                 field("origin"),
-                self.origin
+                site.origin
             ));
         }
         if field("challenge") != challenge {
@@ -2471,6 +3415,206 @@ mod tests {
     use super::*;
     use crate::grants::{grants_for, Authority};
 
+    /// An old `clients.json`: two passkeys, each with its own grants and no person.
+    fn old_clients(layout: &Layout) -> String {
+        let text = r#"{
+  "passkeys": {
+    "bGFwdG9w": { "grants": ["brian", "reviewer"], "label": "laptop", "public_key": "AAAA", "sign_count": 3 },
+    "cGhvbmU": { "grant": "brian", "label": "phone", "public_key": "BBBB" }
+  }
+}
+"#;
+        std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+        std::fs::write(layout.clients_json(), text).unwrap();
+        text.to_string()
+    }
+
+    /// ★ Ledger #4305: an old file migrates to one person per passkey, carrying its label and
+    /// grants, at `rp_id = "localhost"`; the old file is kept beside it; a second run is a no-op.
+    #[test]
+    fn an_old_file_migrates_to_one_person_per_passkey_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        let before = old_clients(&layout);
+        let read_before = read_passkeys(&layout).unwrap();
+        assert_eq!(migrate_people(&layout).unwrap(), 2);
+        assert_eq!(
+            std::fs::read_to_string(people_backup(&layout)).unwrap(),
+            before
+        );
+        let doc = quic::read_object(&layout.clients_json()).unwrap();
+        let people = parse_people(&doc).unwrap();
+        assert_eq!(people.len(), 2, "nothing is merged");
+        let passkeys = read_passkeys(&layout).unwrap();
+        assert_eq!(
+            passkeys, read_before,
+            "the old form reads as the migrated one"
+        );
+        let laptop = &passkeys["bGFwdG9w"];
+        let phone = &passkeys["cGhvbmU"];
+        assert_ne!(laptop.person, phone.person);
+        assert_eq!(laptop.rp_id, "localhost");
+        assert_eq!(phone.rp_id, "localhost");
+        assert_eq!(laptop.sign_count, 3);
+        let mine = &people[person_id(&laptop.person).unwrap()];
+        assert_eq!(mine.label, "laptop");
+        assert_eq!(mine.grants, ["brian", "reviewer"]);
+        assert_eq!(people[person_id(&phone.person).unwrap()].grants, ["brian"]);
+        assert!(laptop.person.len() < 64, "short: {}", laptop.person);
+        assert!(ikigai_core::Capability::scoped(Vec::<String>::new())
+            .with_principal(&laptop.person)
+            .is_ok());
+        let migrated = std::fs::read_to_string(layout.clients_json()).unwrap();
+        let doc = quic::read_object(&layout.clients_json()).unwrap();
+        assert_eq!(
+            doc["passkeys"]["bGFwdG9w"]["grants"],
+            json!(["brian", "reviewer"]),
+            "grants are the person's, mirrored for an older gonk (ledger #4368)"
+        );
+        assert!(
+            doc["passkeys"]["bGFwdG9w"].get("grant").is_none(),
+            "two: no `grant`"
+        );
+        assert_eq!(
+            doc["passkeys"]["cGhvbmU"]["grant"], "brian",
+            "one: `grant` too"
+        );
+        assert_eq!(
+            migrate_people(&layout).unwrap(),
+            0,
+            "a second run changes nothing"
+        );
+        assert_eq!(
+            std::fs::read_to_string(layout.clients_json()).unwrap(),
+            migrated
+        );
+        assert_eq!(
+            std::fs::read_to_string(people_backup(&layout)).unwrap(),
+            before
+        );
+    }
+
+    /// ★ Ledger #4363: an old-form entry put back by hand for a credential whose person is
+    /// already in `people` leaves that person, and its grants, as they are. Ledger #4368: the
+    /// entry is pointed at that person, and holds its grants, not its own.
+    #[test]
+    fn a_hand_edited_old_entry_never_overwrites_its_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        old_clients(&layout);
+        migrate_people(&layout).unwrap();
+        let mut doc = quic::read_object(&layout.clients_json()).unwrap();
+        let laptop = read_passkeys(&layout).unwrap()["bGFwdG9w"].clone();
+        let pid = person_id(&laptop.person).unwrap().to_string();
+        let passkeys = doc.get_mut("passkeys").unwrap().as_object_mut().unwrap();
+        // The phone joins the laptop's person; then the laptop's old entry is put back.
+        passkeys["cGhvbmU"]["person"] = Value::String(laptop.person.clone());
+        passkeys["bGFwdG9w"] = json!({
+            "grant": "root-ish", "label": "laptop", "public_key": "AAAA", "sign_count": 3
+        });
+        let edited = quic::pretty(&Value::Object(doc)).unwrap();
+        std::fs::write(layout.clients_json(), &edited).unwrap();
+        assert_eq!(
+            read_passkeys(&layout).unwrap()["bGFwdG9w"].grants,
+            ["brian", "reviewer"],
+            "read before its migration, the entry already holds its person's grants"
+        );
+        assert_eq!(migrate_people(&layout).unwrap(), 1, "pointed at its person");
+        let doc = quic::read_object(&layout.clients_json()).unwrap();
+        assert_eq!(
+            doc["passkeys"]["bGFwdG9w"]["person"],
+            laptop.person.as_str()
+        );
+        assert_eq!(
+            doc["passkeys"]["bGFwdG9w"]["grants"],
+            json!(["brian", "reviewer"])
+        );
+        assert!(doc["passkeys"]["bGFwdG9w"].get("grant").is_none());
+        let doc = quic::read_object(&layout.clients_json()).unwrap();
+        assert_eq!(
+            parse_people(&doc).unwrap()[&pid].grants,
+            ["brian", "reviewer"],
+            "the person's grants are kept"
+        );
+        assert_eq!(
+            read_passkeys(&layout).unwrap()["cGhvbmU"].grants,
+            ["brian", "reviewer"],
+            "the person's other passkey keeps its authority"
+        );
+    }
+
+    /// ★ Ledger #4305: a passkey's grants are its person's, so two passkeys naming one person
+    /// hold one list, and an author naming either passkey or the person reads as the person's
+    /// label — an author written before the upgrade (a passkey IRI) included.
+    #[test]
+    fn two_passkeys_of_one_person_share_its_grants_and_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        old_clients(&layout);
+        migrate_people(&layout).unwrap();
+        let mut doc = quic::read_object(&layout.clients_json()).unwrap();
+        let laptop = read_passkeys(&layout).unwrap()["bGFwdG9w"].clone();
+        let passkeys = doc.get_mut("passkeys").unwrap().as_object_mut().unwrap();
+        passkeys["cGhvbmU"]["person"] = Value::String(laptop.person.clone());
+        std::fs::write(
+            layout.clients_json(),
+            quic::pretty(&Value::Object(doc)).unwrap(),
+        )
+        .unwrap();
+        let phone = read_passkeys(&layout).unwrap()["cGhvbmU"].clone();
+        assert_eq!(phone.person, laptop.person);
+        assert_eq!(phone.grants, ["brian", "reviewer"], "the person's grants");
+        let rp = Passkeys::new(layout.clone(), 1060);
+        let labels = rp.labels();
+        assert_eq!(labels[&laptop.person], "laptop");
+        assert_eq!(labels[&passkey_iri("bGFwdG9w")], "laptop");
+        assert_eq!(
+            labels[&passkey_iri("cGhvbmU")],
+            "laptop",
+            "a pre-upgrade author"
+        );
+    }
+
+    /// ★ Ledger #4305: a passkey registered at another relying party is refused at sign-in,
+    /// before its signature is looked at, with a sentence that says why.
+    #[test]
+    fn a_passkey_from_another_relying_party_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::in_config_home(dir.path());
+        std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
+        let rp = Passkeys::new(layout.clone(), 1060);
+        write_passkey(
+            &layout,
+            &layout.lock_clients().unwrap(),
+            &Enrolled {
+                credential_id: "ZWxzZXdoZXJl".to_string(),
+                person: person_iri("cGVyc29u"),
+                rp_id: "gonk.example.org".to_string(),
+                grants: vec!["brian".to_string()],
+                label: "elsewhere".to_string(),
+                public_key: "AAAA".to_string(),
+                sign_count: 0,
+            },
+        )
+        .unwrap();
+        let challenge = rp.challenge(Purpose::Login, 10).unwrap();
+        let body = json!({
+            "challenge": challenge,
+            "id": "ZWxzZXdoZXJl",
+            "authenticatorData": "AAAA",
+            "clientDataJSON": "AAAA",
+            "signature": "AAAA",
+        });
+        let refused = rp
+            .login(body.to_string().as_bytes(), 11)
+            .expect_err("refused");
+        assert!(
+            refused.contains("registered for the site `gonk.example.org`")
+                && refused.contains("only at the site it was registered for"),
+            "{refused}"
+        );
+    }
+
     #[test]
     fn an_invite_is_single_use_and_expires() {
         let dir = tempfile::tempdir().unwrap();
@@ -2530,6 +3674,8 @@ mod tests {
             &rp.layout.lock_clients().unwrap(),
             &Enrolled {
                 credential_id: id.to_string(),
+                person: person_iri(&migrated_person_id(id)),
+                rp_id: RP_ID.to_string(),
                 grants: vec![grant.to_string()],
                 label: id.to_string(),
                 public_key: "AAAA".to_string(),
@@ -2663,6 +3809,8 @@ mod tests {
                 &layout.lock_clients().unwrap(),
                 &Enrolled {
                     credential_id: id.to_string(),
+                    person: person_iri(&migrated_person_id(id)),
+                    rp_id: RP_ID.to_string(),
                     grants: vec!["brian".to_string()],
                     label: id.to_string(),
                     public_key: "AAAA".to_string(),
@@ -2970,6 +4118,8 @@ mod tests {
         std::fs::create_dir_all(layout.clients_json().parent().unwrap()).unwrap();
         let old = Enrolled {
             credential_id: "b2xk".to_string(),
+            person: person_iri(&migrated_person_id("b2xk")),
+            rp_id: RP_ID.to_string(),
             grants: vec!["brian".to_string()],
             label: "old".to_string(),
             public_key: "AAAA".to_string(),

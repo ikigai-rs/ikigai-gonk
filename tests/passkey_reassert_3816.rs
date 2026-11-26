@@ -14,7 +14,7 @@ mod common;
 use common::Authenticator;
 use ikigai_gonk::access::{Record, Sink};
 use ikigai_gonk::grants::{grants_for, Authority};
-use ikigai_gonk::identity::{self, Passkeys, Purpose, SESSION_SECONDS};
+use ikigai_gonk::identity::{self, Passkeys, Purpose, SignedIn, SESSION_SECONDS};
 use ikigai_gonk::quic;
 use serde_json::Value;
 
@@ -109,7 +109,7 @@ fn a_challenge_of_another_ceremony_is_refused_both_ways() {
             .rp
             .reassert(
                 body(&rp, &laptop, &challenge, 2, &[("session", &token)]).as_bytes(),
-                None,
+                SignedIn::Principal(None),
                 LAPSED,
             )
             .expect_err("another ceremony's challenge");
@@ -165,7 +165,7 @@ fn an_assertion_by_another_passkey_is_refused() {
         .rp
         .reassert(
             body(&rp, &phone, &challenge, 1, &[("session", &token)]).as_bytes(),
-            None,
+            SignedIn::Principal(None),
             LAPSED,
         )
         .expect_err("another passkey cannot reopen this session");
@@ -184,7 +184,7 @@ fn an_assertion_by_another_passkey_is_refused() {
     rp.rp
         .reassert(
             body(&rp, &laptop, &challenge, 1, &[("session", &token)]).as_bytes(),
-            None,
+            SignedIn::Principal(None),
             LAPSED,
         )
         .expect_err("the signature counter did not advance");
@@ -209,7 +209,7 @@ fn a_reassertion_replaces_only_the_cookies_session_and_reopens_write() {
     );
     let (credential, challenge) = rp
         .rp
-        .reassert_options(Some(&here), None, None, LAPSED)
+        .reassert_options(Some(&here), None, SignedIn::Principal(None), LAPSED)
         .unwrap();
     assert_eq!(identity::passkey_iri(&credential), principal);
 
@@ -217,7 +217,7 @@ fn a_reassertion_replaces_only_the_cookies_session_and_reopens_write() {
         .rp
         .reassert(
             body(&rp, &laptop, &challenge, 3, &[("session", &here)]).as_bytes(),
-            None,
+            SignedIn::Principal(None),
             LAPSED,
         )
         .expect("the same passkey reopens write");
@@ -237,7 +237,7 @@ fn a_reassertion_replaces_only_the_cookies_session_and_reopens_write() {
     rp.rp
         .reassert(
             body(&rp, &laptop, &challenge, 4, &[("session", &token)]).as_bytes(),
-            None,
+            SignedIn::Principal(None),
             LAPSED,
         )
         .expect_err("answered already");
@@ -257,24 +257,34 @@ fn the_session_is_named_by_its_id_when_the_passkey_has_two() {
 
     let refused = rp
         .rp
-        .reassert_options(None, None, Some(&principal), LAPSED)
+        .reassert_options(None, None, SignedIn::Principal(Some(&principal)), LAPSED)
         .expect_err("two sessions, none named");
     assert!(refused.contains("sessionId"), "{refused}");
     // A session id of another passkey's session (here: no session) is refused.
     rp.rp
-        .reassert_options(None, Some(&"0".repeat(64)), Some(&principal), LAPSED)
+        .reassert_options(
+            None,
+            Some(&"0".repeat(64)),
+            SignedIn::Principal(Some(&principal)),
+            LAPSED,
+        )
         .expect_err("not this passkey's session");
 
     let id = identity::session_id(&here);
     let (_, challenge) = rp
         .rp
-        .reassert_options(None, Some(&id), Some(&principal), LAPSED)
+        .reassert_options(
+            None,
+            Some(&id),
+            SignedIn::Principal(Some(&principal)),
+            LAPSED,
+        )
         .unwrap();
     let (token, _) = rp
         .rp
         .reassert(
             body(&rp, &laptop, &challenge, 3, &[("sessionId", &id)]).as_bytes(),
-            Some(&principal),
+            SignedIn::Principal(Some(&principal)),
             LAPSED,
         )
         .expect("the named session is replaced");
@@ -293,7 +303,7 @@ fn the_audit_line_names_the_reassertion() {
     rp.rp
         .reassert(
             body(&rp, &laptop, &challenge, 2, &[("session", &here)]).as_bytes(),
-            None,
+            SignedIn::Principal(None),
             LAPSED,
         )
         .unwrap();

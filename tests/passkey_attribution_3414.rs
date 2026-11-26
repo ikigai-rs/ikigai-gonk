@@ -90,8 +90,13 @@ fn a_long_credential_id_signs_in_and_out_under_the_principal_its_requests_carry(
         .expect("it signs in");
     // What the HTTP door mints into each of this session's requests, and so what every door
     // line of them names (`doors::http_cap`).
-    let door_principal = identity::passkey_iri(&who.enrolled.credential_id);
-    assert_eq!(door_principal, identity::passkey_iri(&id));
+    // ★ Its PERSON since ledger #4305, whatever the length of the credential id.
+    assert_eq!(who.enrolled.credential_id, id);
+    let door_principal = who.enrolled.person.clone();
+    assert!(
+        identity::person_id(&door_principal).is_some(),
+        "{door_principal}"
+    );
     rp.logout(&token);
 
     let lines = lines.lock().unwrap();

@@ -329,6 +329,7 @@ fn unconfigured_inquiry(face: &web::Web) -> Vec<u8> {
         passkeys: Some(Arc::clone(&face.passkeys)),
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     let edge = doors::edge_config(door.clone());
     std::thread::spawn(move || {
@@ -400,6 +401,7 @@ fn tabbed_layers(face: &web::Web) -> Vec<(String, &'static str, Vec<u8>)> {
         passkeys: Some(Arc::clone(&face.passkeys)),
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     let edge = doors::edge_config(door.clone());
     std::thread::spawn(move || {
@@ -479,6 +481,7 @@ fn outage(face: &web::Web) -> Vec<u8> {
         passkeys: Some(Arc::clone(&face.passkeys)),
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     let edge = ikigai_gonk::refusal::install(doors::edge_config(door.clone()), door.clone(), face);
     std::thread::spawn(move || {
@@ -955,6 +958,7 @@ fn main() {
         passkeys: Some(passkeys),
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     let edge = doors::edge_config(door.clone());
     std::thread::spawn(move || {

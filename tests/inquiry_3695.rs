@@ -28,7 +28,7 @@ mod inquiry_host;
 
 use common::Authenticator;
 use futures::executor::block_on;
-use ikigai_core::{ArgRef, Capability, Iri, Kernel, Request, Verb};
+use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Representation, Request, Verb};
 use ikigai_fn::html::url_segment as encode;
 use ikigai_gonk::identity::{self, Passkeys};
 use ikigai_gonk::inquiry::{Inquiry, Token};
@@ -69,12 +69,28 @@ const CHROME_ACCEPT: &str =
 /// A scratch gonk HTTP door with the inquiry client over `host`'s door as `slug`, or none.
 struct Gonk {
     addr: SocketAddr,
+    http: Arc<Kernel>,
+    page_space: Arc<dyn ikigai_core::Space>,
     layout: quic::Layout,
     hub: Arc<Kernel>,
     _config: tempfile::TempDir,
 }
 
 impl Gonk {
+    fn invoke(&self, req: &Request) -> Result<Representation, Error> {
+        use ikigai_core::{Invocation, Resolution, Scope};
+        let Resolution::Hit(route) = self.page_space.resolve(req, &Scope::empty()) else {
+            panic!("missing endpoint for {}", req.target);
+        };
+        let cap = Capability::root();
+        block_on(route.endpoint.invoke(&Invocation::with_issuer(
+            req,
+            &route.bindings,
+            &cap,
+            &*self.http,
+        )))
+    }
+
     fn start(inquiry: Option<Arc<Inquiry>>, anonymous: Vec<String>) -> Gonk {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let listener = runtime
@@ -102,17 +118,21 @@ impl Gonk {
             inquiry: inquiry.as_ref().map(|i| i.owner().to_string()),
         });
         let pages = web::door_space(Arc::clone(&face), None, inquiry);
-        let http = Arc::new(doors::http_kernel_with(Arc::clone(&hub), pages, None));
+        let (http, page_space) =
+            doors::http_kernel_serving_with_space(Arc::clone(&hub), pages, vec![], None);
+        let http = Arc::new(http);
+        let serving = Arc::clone(&http);
         let door = doors::HttpDoor {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
             public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         std::thread::spawn(move || {
             runtime.block_on(ikigai_web::serve_with_listener(
-                http,
+                serving,
                 doors::http_cap(door.clone()),
                 listener,
                 doors::edge_config(door),
@@ -120,6 +140,8 @@ impl Gonk {
         });
         Gonk {
             addr,
+            http,
+            page_space,
             layout,
             hub,
             _config: config,
@@ -626,5 +648,71 @@ fn explicit_layer_names_are_the_ones_the_view_reads() {
             .iter()
             .any(|t| t.contains(&format!("urn:layer:{INQUIRY}:"))),
         "the view read the owner-suffixed layer: {targets:?}"
+    );
+}
+
+#[test]
+fn an_invalid_spam_day_is_refused_before_an_action_moves_the_inquiry() {
+    let host = seeded();
+    let gonk = Gonk::over(&host, "brian");
+    let session = gonk.sign_in(
+        "day-check",
+        &tokens(&[Token::Read, Token::Triage, Token::Curate]),
+    );
+    assert_eq!(
+        gonk.page("/inquiry/view/name/spam", Some(&session)).status,
+        200
+    );
+    assert_eq!(gonk.page(&spam_path(), Some(&session)).status, 200);
+
+    let path = format!("{NOT_SPAM}?day=yesterday");
+    let refusal = gonk.press(&path, "s1", Some(&session), &gonk.origin());
+    assert_eq!(refusal.status, 400, "{refusal:?}");
+    assert!(
+        refusal.body.contains("day") && refusal.body.contains("YYYY-MM-DD"),
+        "{refusal:?}"
+    );
+    assert_eq!(host.ids(SPAM), ["s1"]);
+
+    let path = format!("{NOT_SPAM}?day={DAY}");
+    let response = gonk.press(&path, "s1", Some(&session), &gonk.origin());
+    assert_eq!(response.status, 200, "{response:?}");
+    assert!(host.ids(SPAM).is_empty());
+}
+
+#[test]
+fn inquiry_requests_refuse_unreadable_day_and_form_values() {
+    let host = seeded();
+    let gonk = Gonk::over(&host, "brian");
+    let view = Request::new(
+        Verb::Source,
+        Iri::parse("urn:iki:gonk:page:inquiry:view:name:spam").unwrap(),
+    );
+    let action = Request::new(
+        Verb::Sink,
+        Iri::parse("urn:iki:gonk:inquiry:view:name:spam:action:name:not-spam").unwrap(),
+    )
+    .with_arg("content", ArgRef::Inline(b"inquiry=s1".to_vec()));
+    let before = host.seen();
+    for (request, name) in [(&view, "day"), (&action, "day"), (&action, "content")] {
+        for arg in [
+            ArgRef::Inline(vec![0xff]),
+            ArgRef::Reference(Iri::parse("urn:test:value").unwrap()),
+            ArgRef::Content(ikigai_core::ContentId::of(b"value")),
+        ] {
+            let result = gonk
+                .invoke(&request.clone().with_arg(name, arg))
+                .map(|rep| rep.repr_type.media_type);
+            assert!(
+                matches!(&result, Err(Error::InvalidArgument { name: actual, .. })
+                if actual == name),
+                "{result:?}"
+            );
+        }
+    }
+    assert_eq!(
+        host.seen(),
+        before,
+        "invalid arguments did not reach the layer host"
     );
 }

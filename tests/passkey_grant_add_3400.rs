@@ -104,6 +104,11 @@ fn adding_a_grant_widens_that_passkey_only_and_is_recorded() {
         "{log}"
     );
     assert!(!lines[0].contains("invite="), "{log}");
+    // ★ Ledger #4363: the grants are the person's, so the line names the person too.
+    assert!(
+        lines[0].ends_with(&format!(" by=owner person={}", now.person)),
+        "{log}"
+    );
 
     // The same reader `passkey list` uses sees it as the owner's.
     let changes = identity::grant_changes(&layout).unwrap();
@@ -112,6 +117,7 @@ fn adding_a_grant_widens_that_passkey_only_and_is_recorded() {
     assert_eq!(changes[0].grant, "writer");
     assert_eq!(changes[0].invite, None);
     assert_eq!(changes[0].by.as_deref(), Some(identity::BY_OWNER));
+    assert_eq!(changes[0].person.as_deref(), Some(now.person.as_str()));
 }
 
 /// A grant `grants.json` does not define, one it defines with no scopes, one the passkey

@@ -171,6 +171,7 @@ impl Endpoint for Opening {
         let iri = Iri::parse(&target)
             .map_err(|e| ikigai_core::Error::Endpoint(format!("`{target}`: {e}")))?;
         let mut request = Request::new(Verb::Source, iri);
+        // optional-arg: deliberate: the theme is a best-effort presentation preference, like render::theme_of.
         if let Ok(theme) = inv.inline_arg("theme") {
             request = request.with_arg("theme", ArgRef::Inline(theme.to_vec()));
         }

@@ -146,7 +146,7 @@ pub const BACKUP_DIR_NAME: &str = "backups";
 pub const DEFAULT_QUEUE_SERIOUS: &str = "critical,major";
 
 /// Every key this server reads.
-const KEYS: [&str; 70] = [
+const KEYS: [&str; 72] = [
     crate::constraint::SAMPLE_KEY,
     crate::constraint::EVERY_KEY,
     crate::constraint::HOST_KEY,
@@ -177,6 +177,8 @@ const KEYS: [&str; 70] = [
     "gonk.http.anonymous_sparql_budget_ms",
     "gonk.http.session_idle_minutes",
     "gonk.http.session_max_hours",
+    "gonk.http.public_origin",
+    "gonk.http.public_bind",
     "gonk.browse.root",
     "gonk.browse.github",
     "gonk.repository",
@@ -284,8 +286,8 @@ usage:
                                    it would remove and add, and writes nothing. Effective at
                                    the next request (HTTP) or connection (QUIC), with no restart
   ikigai-gonk passkey list [--config PATH]
-                                   every enrolled passkey: its label, grants, credential id
-                                   and IRI, each grant's scopes as grants.json stores them,
+                                   every enrolled passkey: its label, its person (IRI and
+                                   label), grants, credential id and IRI, each grant's scopes as grants.json stores them,
                                    and each grant an invite added to it (or that was
                                    removed), with the invite's hash
   ikigai-gonk passkey grant add <label> | --credential <id> <grant> [--config PATH]
@@ -325,6 +327,20 @@ usage:
                                    --scope adds a scope no other flag names (urn:cap:exec:read:git),
                                    in the same write; a repeat, or one a flag already grants, is
                                    stored once
+  ikigai-gonk passkey invite --person <person IRI | label> [--minutes N] [--port N] [--config PATH]
+                                   print a one-time link that enrolls a NEW passkey of an
+                                   existing person (a second device), instead of a person of
+                                   its own: it holds that person's grants from its first
+                                   request, and its writes are that person's. No grant is
+                                   written
+  ikigai-gonk passkey attach <label> | --credential <id> --person <person IRI | label> [--config PATH]
+                                   make an enrolled passkey name another person: it then
+                                   holds that person's grants and writes as that person.
+                                   This is how two passkeys enrolled as two people become
+                                   one. The person it named before is kept (the record still
+                                   names it), and so is what that person holds (a claim
+                                   taken as it stays its own); appends a gonk:PasskeyAttached
+                                   line to gonk/passkeys.log
 
   Rewriting an EXISTING grant with different scopes is refused, naming every scope it would
   remove and add; --force writes it and prints the same list. --force writes the grant WHOLE
@@ -671,6 +687,26 @@ pub enum Command {
         /// `--config`.
         flags: Flags,
     },
+    /// Invite a browser to enroll a new passkey of an existing person (ledger #4305).
+    PasskeyInvitePerson {
+        /// `--person`: the person's IRI, or its label.
+        person: String,
+        /// How long the invite is valid.
+        minutes: u64,
+        /// `--config` / `--port`, so the printed URL names the port the server serves on.
+        flags: Flags,
+    },
+    /// Make one enrolled passkey name another person, and record it (ledger #4305).
+    PasskeyAttach {
+        /// The label, or — with `--credential` — the credential id.
+        key: String,
+        /// Whether `key` is a label (`true`) or a credential id.
+        by_label: bool,
+        /// `--person`: the person's IRI, or its label.
+        person: String,
+        /// `--config`.
+        flags: Flags,
+    },
     /// Invite a browser to enroll a passkey under a grant.
     PasskeyInvite {
         /// The grant name (and the default label).
@@ -852,6 +888,10 @@ pub struct Settings {
     pub text_index: bool,
     /// The HTTP door's address. Always loopback — see [`refuse_non_loopback`].
     pub http: SocketAddr,
+    /// The public listener behind a TLS proxy (`gonk.http.public_origin` and
+    /// `gonk.http.public_bind`, ledger #4367), or `None` — and then the server behaves exactly
+    /// as it did before the keys existed.
+    pub public_http: Option<PublicHttp>,
     /// The socket path.
     pub socket: PathBuf,
     /// The QUIC door's address, and whether anyone asked for it. Whether it actually opens
@@ -2054,12 +2094,14 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
             return Ok(Command::PasskeyList { flags });
         }
         Some("grant") => return parse_passkey_grant(args),
-        Some(sub @ ("revoke" | "logout" | "remove-grant")) => {
+        Some(sub @ ("revoke" | "logout" | "remove-grant" | "attach")) => {
             let mut flags = Flags::default();
             let (mut label, mut credential, mut all, mut grant) = (None, None, false, None);
+            let mut person = None;
             while let Some(arg) = args.next() {
                 match arg.as_str() {
                     "--credential" => credential = Some(value(&mut args, "--credential")?),
+                    "--person" if sub == "attach" => person = Some(value(&mut args, "--person")?),
                     "--grant" if sub == "remove-grant" => {
                         grant = Some(value(&mut args, "--grant")?)
                     }
@@ -2093,6 +2135,18 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
                     ))
                 }
             };
+            if sub == "attach" {
+                let person = person.ok_or(
+                    "passkey attach: expected --person <person IRI | label> (as `passkey list` \
+                     prints it)",
+                )?;
+                return Ok(Command::PasskeyAttach {
+                    key,
+                    by_label,
+                    person,
+                    flags,
+                });
+            }
             if sub == "remove-grant" {
                 let grant = grant.ok_or(
                     "passkey remove-grant: expected --grant <name> (as `passkey list` prints it)",
@@ -2121,22 +2175,26 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some(other) => {
             return Err(format!(
                 "passkey: unknown subcommand `{other}` (expected `invite`, `list`, `revoke`, \
-                 `grant add`, `grant remove` or `logout --all`)"
+                 `grant add`, `grant remove`, `attach` or `logout --all`)"
             ))
         }
         None => {
             return Err(
                 "passkey: expected `invite <name>`, `list`, `revoke <label>`, \
-                        `grant add <label> <grant>`, `grant remove <label> <grant>` or \
-                        `logout --all <label>`"
+                        `grant add <label> <grant>`, `grant remove <label> <grant>`, \
+                        `attach <label> --person <person>` or `logout --all <label>`"
                     .to_string(),
             )
         }
     }
+    let mut args = args.peekable();
+    if args.peek().map(String::as_str) == Some("--person") {
+        return parse_invite_person(args);
+    }
     let name = args
         .next()
         .filter(|name| !name.starts_with('-'))
-        .ok_or("passkey invite: expected <name>")?;
+        .ok_or("passkey invite: expected <name>, or --person <person IRI | label>")?;
     let (mut grant, mut force, mut minutes, mut flags) = (
         GrantFlags::default(),
         false,
@@ -2192,6 +2250,48 @@ fn parse_passkey(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         nl_draft,
         scopes,
         force,
+        minutes,
+        flags,
+    })
+}
+
+/// `passkey invite --person <person IRI | label> [--minutes N] [--port N] [--config PATH]`
+/// (ledger #4305): an invite for a new passkey of an existing person. It writes no grant, so
+/// the grant flags are refused rather than ignored.
+fn parse_invite_person(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    let (mut person, mut minutes, mut flags) =
+        (None, crate::identity::INVITE_MINUTES, Flags::default());
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--person" => person = Some(value(&mut args, "--person")?),
+            "--minutes" => {
+                let spelled = value(&mut args, "--minutes")?;
+                minutes = spelled
+                    .parse()
+                    .ok()
+                    .filter(|m| (1..=24 * 60).contains(m))
+                    .ok_or_else(|| format!("--minutes: `{spelled}` is not 1 to 1440"))?;
+            }
+            "--port" => {
+                let port = value(&mut args, "--port")?;
+                flags.port = Some(
+                    port.parse()
+                        .map_err(|_| format!("--port: `{port}` is not a port number"))?,
+                );
+            }
+            flag @ ("--config" | "--config-home" | "--data-home") => {
+                home_flag(flag, &mut args, &mut flags)?
+            }
+            other => {
+                return Err(format!(
+                    "passkey invite --person: unexpected argument `{other}` — the new passkey \
+                     holds the person's grants, so this invite takes no name and no grant flags"
+                ))
+            }
+        }
+    }
+    Ok(Command::PasskeyInvitePerson {
+        person: person.ok_or("passkey invite --person: expected <person IRI | label>")?,
         minutes,
         flags,
     })
@@ -2403,6 +2503,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
     check_keys(text)?;
     let http = resolve_bind(flags.bind.as_deref(), flags.port, text)?;
     refuse_non_loopback(http)?;
+    let public_http = public_http(text, http)?;
     let socket = socket_for(flags, text, homes);
     let quic = quic_bind(flags, text, http)?;
     // ⚠ The socket's LENGTH is not checked here (ledger #1093): every subcommand reads these
@@ -2553,6 +2654,7 @@ pub fn settings(flags: &Flags, text: &str, homes: &Homes) -> Result<Settings, St
         max_scoped_copy_quads: max_scoped_copy_quads(text)?,
         text_index: text_index(text)?,
         http,
+        public_http,
         socket,
         quic,
         http_ledgers,
@@ -3198,6 +3300,112 @@ pub fn resolve_bind(
     Ok(SocketAddr::from(([127, 0, 0, 1], DEFAULT_PORT)))
 }
 
+/// The public HTTP listener (ledger #4367): a SECOND loopback listener only a TLS proxy points
+/// at (`tailscale serve`), answering as `origin`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublicHttp {
+    /// The `https://` origin a browser reaches through the proxy, normalized: lowercase, no
+    /// trailing `/`, no path (`https://box.tail1.ts.net`).
+    pub origin: String,
+    /// The loopback address the proxy forwards to.
+    pub bind: SocketAddr,
+}
+
+/// `gonk.http.public_origin` and `gonk.http.public_bind`, both or neither: an `https://` origin
+/// with a host and nothing else, and a loopback address that is not the local door's.
+///
+/// ```
+/// use ikigai_gonk::config::public_http;
+/// let local = "127.0.0.1:1062".parse().unwrap();
+/// assert_eq!(public_http("", local), Ok(None));
+/// let both = "gonk.http.public_origin = \"https://Box.tail1.ts.net/\"\n\
+///             gonk.http.public_bind = \"127.0.0.1:1063\"\n";
+/// let public = public_http(both, local).unwrap().unwrap();
+/// assert_eq!(public.origin, "https://box.tail1.ts.net");
+/// assert!(public_http("gonk.http.public_bind = \"127.0.0.1:1063\"\n", local).is_err());
+/// ```
+pub fn public_http(text: &str, local: SocketAddr) -> Result<Option<PublicHttp>, String> {
+    let origin = value_for(text, "gonk.http.public_origin");
+    let bind = value_for(text, "gonk.http.public_bind");
+    let (origin, bind) = match (origin, bind) {
+        (None, None) => return Ok(None),
+        (Some(_), None) => {
+            return Err(
+                "gonk.http.public_origin is set without gonk.http.public_bind: the \
+                 public origin is served on its own loopback port, the one the TLS proxy \
+                 forwards to — add `gonk.http.public_bind = \"127.0.0.1:<port>\"`"
+                    .to_string(),
+            )
+        }
+        (None, Some(_)) => {
+            return Err(
+                "gonk.http.public_bind is set without gonk.http.public_origin: the \
+                 public listener needs the `https://` origin browsers reach it at — add \
+                 `gonk.http.public_origin = \"https://<host>\"`"
+                    .to_string(),
+            )
+        }
+        (Some(origin), Some(bind)) => (origin, bind),
+    };
+    let origin = public_origin(&origin)?;
+    let bind: SocketAddr = bind.trim().parse().map_err(|_| {
+        format!(
+            "gonk.http.public_bind: `{bind}` is not an address and port such as \
+             `127.0.0.1:1063`"
+        )
+    })?;
+    if !crate::doors::is_loopback(bind.ip()) {
+        return Err(format!(
+            "gonk.http.public_bind: refusing {bind}, which is not loopback — the public \
+             listener is reached only through a TLS proxy on this machine (`tailscale serve`), \
+             so it binds 127.0.0.1 or [::1] like the HTTP door"
+        ));
+    }
+    if bind.port() == 0 || bind == local {
+        return Err(format!(
+            "gonk.http.public_bind: `{bind}` must be a port of its own, not 0 and not the HTTP \
+             door's {local}: the listener a request arrives on is what tells a proxied request \
+             from a local process"
+        ));
+    }
+    Ok(Some(PublicHttp { origin, bind }))
+}
+
+/// `spelled` as an `https://<host>[:port]` origin, or why it is not one.
+fn public_origin(spelled: &str) -> Result<String, String> {
+    let lower = spelled.trim().to_ascii_lowercase();
+    let Some(authority) = lower.strip_prefix("https://") else {
+        return Err(format!(
+            "gonk.http.public_origin: `{spelled}` is not an `https://` origin — a passkey and \
+             the `Secure` session cookie need TLS, which the proxy in front of gonk provides"
+        ));
+    };
+    let authority = authority.strip_suffix('/').unwrap_or(authority);
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) => (host, Some(port)),
+        None => (authority, None),
+    };
+    let host_ok = !host.is_empty()
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+        && host.parse::<std::net::IpAddr>().is_err()
+        && host != "localhost";
+    let port_ok = port.is_none_or(|p| p.parse::<u16>().is_ok_and(|p| p != 0));
+    if !host_ok || !port_ok {
+        return Err(format!(
+            "gonk.http.public_origin: `{spelled}` is not an origin such as \
+             `https://box.tail1.ts.net` — a scheme and a DNS host name (not an IP address, \
+             not `localhost`), an optional port, and no path, query or user"
+        ));
+    }
+    Ok(format!("https://{authority}"))
+}
+
 /// ★ **The HTTP door binds loopback, or the server does not start.**
 ///
 /// It is unauthenticated: it grants READ on its ledgers to whatever reaches it (and write to
@@ -3212,7 +3420,7 @@ pub fn refuse_non_loopback(addr: SocketAddr) -> Result<(), String> {
     }
     Err(format!(
         "refusing to serve HTTP on {addr}: the HTTP door is unauthenticated — it grants read \
-         and write on its ledgers to whoever reaches it — so it binds loopback only \
+         on its ledgers to whoever reaches it — so it binds loopback only \
          (127.0.0.1 or [::1]). To reach gonk from another machine, use the QUIC door, which \
          admits a connection only by a client certificate enrolled with `ikigai-gonk client \
          add`."
@@ -4184,6 +4392,59 @@ mod tests {
         ] {
             assert!(parse_args(args(line)).is_ok(), "{line}");
         }
+    }
+
+    /// Ledger #4305: `passkey invite --person` and `passkey attach … --person`.
+    #[test]
+    fn a_person_is_named_to_invite_for_and_attach_to() {
+        let args = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        match parse_args(args(
+            "passkey invite --person brian --minutes 5 --port 1070",
+        ))
+        .unwrap()
+        {
+            Command::PasskeyInvitePerson {
+                person,
+                minutes,
+                flags,
+            } => {
+                assert_eq!(person, "brian");
+                assert_eq!(minutes, 5);
+                assert_eq!(flags.port, Some(1070));
+            }
+            other => panic!("{other:?}"),
+        }
+        let refused =
+            parse_args(args("passkey invite --person brian --ledger default=write")).unwrap_err();
+        assert!(
+            refused.contains("takes no name and no grant flags"),
+            "{refused}"
+        );
+        match parse_args(args(
+            "passkey attach --credential cGhvbmU --person urn:iki:gonk:person:id:x",
+        ))
+        .unwrap()
+        {
+            Command::PasskeyAttach {
+                key,
+                by_label,
+                person,
+                ..
+            } => {
+                assert_eq!((key.as_str(), by_label), ("cGhvbmU", false));
+                assert_eq!(person, "urn:iki:gonk:person:id:x");
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse_args(args("passkey attach phone --person brian")).unwrap() {
+            Command::PasskeyAttach { key, by_label, .. } => {
+                assert_eq!((key.as_str(), by_label), ("phone", true))
+            }
+            other => panic!("{other:?}"),
+        }
+        let refused = parse_args(args("passkey attach phone")).unwrap_err();
+        assert!(refused.contains("expected --person"), "{refused}");
+        assert!(parse_args(args("passkey revoke phone --person brian")).is_err());
     }
 
     /// ★ The browse graph is a SUBJECT of a grant, not a ledger — every spelling, because

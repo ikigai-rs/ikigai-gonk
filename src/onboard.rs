@@ -2384,12 +2384,8 @@ async fn off_thread<T: Send + 'static>(work: impl FnOnce() -> T + Send + 'static
         .map_err(|_| Error::Endpoint("an onboarding call panicked".to_string()))
 }
 
-fn wants_json(inv: &Invocation<'_>) -> bool {
-    inv.inline_str("as").ok() == Some(JSON)
-}
-
-fn answer(inv: &Invocation<'_>, json: Value, text: String) -> Representation {
-    if wants_json(inv) {
+fn answer(face: &str, json: Value, text: String) -> Representation {
+    if face == JSON {
         Representation::new(
             ReprType::new(JSON),
             serde_json::to_vec_pretty(&json).expect("JSON serializes"),
@@ -2427,6 +2423,11 @@ fn minted_json(m: &Minted) -> Value {
 #[async_trait]
 impl Endpoint for Resource {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let face = if matches!(self.op, Op::Kind) {
+            N_TRIPLES
+        } else {
+            crate::web::response_face(inv, TEXT, &[TEXT, JSON])?
+        };
         let onboard = Arc::clone(&self.onboard);
         match self.op {
             Op::Invite => {
@@ -2447,7 +2448,7 @@ impl Endpoint for Resource {
                     minted.door,
                     minted.pin
                 );
-                Ok(answer(inv, minted_json(&minted), text))
+                Ok(answer(face, minted_json(&minted), text))
             }
             Op::Pending => {
                 let pending = off_thread(move || onboard.pending())
@@ -2459,7 +2460,7 @@ impl Endpoint for Resource {
                     pending.iter().map(Checked::line).collect()
                 };
                 Ok(answer(
-                    inv,
+                    face,
                     json!({ "pending": pending.iter().map(Checked::json).collect::<Vec<_>>() }),
                     text,
                 ))
@@ -2469,13 +2470,13 @@ impl Endpoint for Resource {
                 let checked = off_thread(move || onboard.check(&id))
                     .await?
                     .map_err(Error::Endpoint)?;
-                Ok(answer(inv, checked.json(), checked.line()))
+                Ok(answer(face, checked.json(), checked.line()))
             }
             Op::Approve => {
                 let id = inv.inline_str("entry")?.to_string();
                 let (said, status) = off_thread(move || onboard.approve(&id)).await??;
                 Ok(answer(
-                    inv,
+                    face,
                     json!({ "entitlement": said, "status": status.json() }),
                     format!("approved: {said}\n{}", status.text()),
                 ))
@@ -2484,18 +2485,18 @@ impl Endpoint for Resource {
                 let who = inv.inline_str("who")?.to_string();
                 let (said, status) = off_thread(move || onboard.revoke(&who)).await??;
                 Ok(answer(
-                    inv,
+                    face,
                     json!({ "revocation": said, "status": status.json() }),
                     format!("revoked: {said}\n{}", status.text()),
                 ))
             }
             Op::Apply => {
                 let status = off_thread(move || onboard.apply()).await?;
-                Ok(answer(inv, status.json(), status.text()))
+                Ok(answer(face, status.json(), status.text()))
             }
             Op::Status => {
                 let status = onboard.status();
-                Ok(answer(inv, status.json(), status.text()))
+                Ok(answer(face, status.json(), status.text()))
             }
             Op::Kind => {
                 let kind = inv.bindings.get("kind").unwrap_or_default().to_string();
@@ -2514,7 +2515,7 @@ impl Endpoint for Resource {
                     .get(&id)
                     .ok_or_else(|| Error::NotFound(format!("no invite `{id}`")))?;
                 Ok(answer(
-                    inv,
+                    face,
                     json!({
                         "invite": invite.id,
                         "name": invite.name,

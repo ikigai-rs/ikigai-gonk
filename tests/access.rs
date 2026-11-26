@@ -82,6 +82,7 @@ fn serve_http(sink: ikigai_gonk::access::Sink) -> (SocketAddr, tempfile::TempDir
         passkeys: None,
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     std::thread::spawn(move || {
         runtime.block_on(ikigai_web::serve_with_listener(

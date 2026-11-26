@@ -160,6 +160,9 @@ fn a_signed_in_redemption_adds_the_grant_to_that_passkey_only() {
     assert!(line.contains(" added=writer"), "{line}");
     assert!(line.contains(" grant=viewer,writer"), "{line}");
     assert!(line.contains(" invite=sha256:"), "{line}");
+    // ★ Ledger #4363: the person whose grants these are.
+    let person = &who.enrolled.person;
+    assert!(line.ends_with(&format!(" person={person}")), "{line}");
     assert!(
         !log.contains(&code),
         "the code itself is never written: {log}"
@@ -215,7 +218,7 @@ fn a_redemption_without_a_fresh_assertion_is_refused() {
         .add_grant(body.as_bytes(), NOW)
         .expect_err("another passkey");
     assert!(
-        refused.contains("not the one you are signed in with"),
+        refused.contains("not a passkey of the person you are signed in as"),
         "{refused}"
     );
 
@@ -256,7 +259,8 @@ fn a_redemption_without_a_fresh_assertion_is_refused() {
 }
 
 /// A `clients.json` every earlier server wrote — `"grant": "<name>"` — still loads and signs
-/// in; the next write of that entry is in the list form.
+/// in; the entry is then written in the list form, on the PERSON it now names (ledger #4305:
+/// grants moved from the passkey to its person, and the passkey keeps none of its own).
 #[test]
 fn the_single_name_form_still_loads_and_the_list_form_is_written() {
     use base64::Engine;
@@ -289,12 +293,22 @@ fn the_single_name_form_still_loads_and_the_list_form_is_written() {
     let (_, who) = sign_in(&rp, &auth, 1);
     assert_eq!(who.enrolled.grants, ["alice"]);
 
-    // The sign-in moved the counter, so the entry was written: in the list form.
+    // The entry was written (migrated at start, and again as the sign-in moved the counter):
+    // the list form, on its person. The entry keeps only the mirror an older gonk reads
+    // (ledger #4368): its person's grants, and `grant` too since the person holds one.
     let written: Value =
         serde_json::from_str(&std::fs::read_to_string(layout.clients_json()).unwrap()).unwrap();
     let entry = &written["passkeys"][base64_id(&auth)];
     assert_eq!(entry["grants"], json!(["alice"]), "{written}");
-    assert!(entry.get("grant").is_none(), "{written}");
+    assert_eq!(entry["grant"], json!("alice"), "{written}");
+    let person = entry["person"].as_str().expect("names its person");
+    let id = identity::person_id(person).expect("a person IRI");
+    assert_eq!(
+        written["people"][id]["grants"],
+        json!(["alice"]),
+        "{written}"
+    );
+    assert!(written["people"][id].get("grant").is_none(), "{written}");
 }
 
 /// Taking one grant off one passkey leaves its other grants, every other passkey and
@@ -335,9 +349,10 @@ fn removing_one_grant_from_a_passkey_touches_nothing_else() {
     let who = rp.identity(&session, NOW).expect("still signed in");
     assert_eq!(who.enrolled.grants, ["writer"]);
     assert!(log(&layout).contains(&format!(
-        "{} {} label=software-laptop grant=writer removed=viewer",
+        "{} {} label=software-laptop grant=writer removed=viewer person={}",
         identity::GRANT_REMOVED,
-        identity::passkey_iri(&laptop_id)
+        identity::passkey_iri(&laptop_id),
+        now.person
     )));
 
     let refused =

@@ -31,6 +31,16 @@ const MAX_ANSWER: usize = 8 * 1024 * 1024;
 /// keeps cursors in memory, useful for embedded kernels. Production uses the store directory.
 /// Invalid, public or oversized existing files fail startup rather than resetting readers.
 pub fn space(path: Option<PathBuf>) -> Result<EndpointSpace> {
+    space_with_former(path, Arc::new(|_: &str| Vec::new()))
+}
+
+/// The principals a reader was known by before (ledger #4305): for a person IRI, the passkey
+/// IRI of each of its passkeys, which signed-in requests carried before people.
+pub type Former = Arc<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+
+/// [`space`], where a reader with no cursor of its own adopts the one it acknowledged under a
+/// principal `former` names — so a person keeps the cursor its passkey held.
+pub fn space_with_former(path: Option<PathBuf>, former: Former) -> Result<EndpointSpace> {
     let cursors = Arc::new(Mutex::new(Cursors::open(path)?));
     Ok(EndpointSpace::new()
         .bind(
@@ -38,16 +48,18 @@ pub fn space(path: Option<PathBuf>) -> Result<EndpointSpace> {
                 .expect("static template"),
             Dispatch {
                 cursors: cursors.clone(),
+                former: former.clone(),
             },
         )
         .bind(
             UriTemplate::parse("urn:iki:gonk:dispatch:{ledger}").expect("static template"),
-            Dispatch { cursors },
+            Dispatch { cursors, former },
         )
         .named(crate::spaces::iri(crate::spaces::DISPATCH)))
 }
 struct Dispatch {
     cursors: Arc<Mutex<Cursors>>,
+    former: Former,
 }
 
 fn req(target: &str) -> Result<Request> {
@@ -108,10 +120,22 @@ impl Endpoint for Dispatch {
             ledger.name(),
             id.map_or_else(|| "all".into(), |id| id.to_string())
         );
-        let key = digest(
-            &serde_json::to_vec(&(principal, &scope))
-                .map_err(|e| Error::Endpoint(e.to_string()))?,
-        );
+        let key_of = |principal: &str| {
+            serde_json::to_vec(&(principal, &scope))
+                .map(|bytes| digest(&bytes))
+                .map_err(|e| Error::Endpoint(e.to_string()))
+        };
+        let key = key_of(principal)?;
+        let former = (self.former)(principal)
+            .iter()
+            .map(|old| key_of(old))
+            .collect::<Result<Vec<_>>>()?;
+        if !former.is_empty() {
+            self.cursors
+                .lock()
+                .map_err(|_| Error::Endpoint("dispatch: cursor lock poisoned".into()))?
+                .adopt(&key, &former);
+        }
         let now = crate::agents::now_ms(inv)?;
         match inv.request.verb {
             Verb::Sink => {

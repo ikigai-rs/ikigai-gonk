@@ -51,6 +51,22 @@
 //! While an open item carries the sensor's label nothing more is filed, so a restart (which
 //! forgets which sensors were firing) does not file a second.
 //!
+//! # The first tick
+//!
+//! A restart never pushes the next tick more than one `every` past the last one (ledger
+//! [#4364](http://localhost:1062/l/default/item/4364)). Each tick stamps its time, before it
+//! runs, in the data home's `sensors/last-tick` ([`Pace`]), and a start phases its first tick
+//! to that stamp ([`first_delay`]), the way the backup timer phases to its newest archive: a
+//! restart 30 minutes after a tick on an hourly cadence ticks 30 minutes later, not an hour
+//! later. A timer that waited a whole cadence from each start never ran a sensor on a gonk
+//! restarted more often than its cadence.
+//!
+//! With no stamp (the first start, or a stamp that cannot be written), or one already a cadence
+//! old, the first tick runs at once. That is chosen over waiting because a tick costs little
+//! twice: it is read-only queries plus a filing the open-item rule already guards, so an extra
+//! tick after a restart costs a query and files nothing twice. A stamp in the future (a clock
+//! stepped back) waits one cadence, no more.
+//!
 //! # The clock
 //!
 //! A sensor that compares against the time declares `# @param now xsd:dateTime`, and the tick
@@ -429,11 +445,17 @@ impl Sensors {
         ))
     }
 
-    /// Run [`Sensors::tick`] every `every` on a thread of its own, the first one `every` from
-    /// now, against the hub `hub` holds.
-    pub fn start(self: &Arc<Self>, hub: std::sync::Weak<Kernel>, every: Duration) {
+    /// Run [`Sensors::tick`] every `every` on a thread of its own, against the hub `hub` holds,
+    /// on `pace`'s clock: the first tick [`first_delay`] from now, phased to the last one
+    /// `pace` stamped, and each tick stamped there as it starts (see "The first tick").
+    pub fn start(
+        self: &Arc<Self>,
+        hub: std::sync::Weak<Kernel>,
+        every: Duration,
+        pace: Pace,
+    ) -> Option<std::thread::JoinHandle<()>> {
         let sensors = Arc::clone(self);
-        let _ = std::thread::Builder::new()
+        let spawned = std::thread::Builder::new()
             .name("gonk-sensors".to_string())
             .spawn(move || {
                 let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -446,19 +468,108 @@ impl Sensors {
                         return;
                     }
                 };
+                let first = first_delay(pace.now_ms(), pace.last_tick(), every);
+                (pace.sleep)(first);
                 loop {
-                    std::thread::sleep(every);
                     let Some(hub) = hub.upgrade() else {
                         return;
                     };
-                    let now = crate::access::now().as_millis();
+                    let now = pace.now_ms();
+                    pace.stamp_tick(now);
                     for reading in runtime.block_on(sensors.tick(&hub, now)) {
                         if let Some(e) = &reading.error {
                             eprintln!("ikigai-gonk: sensor {}: {e}", reading.name);
                         }
                     }
+                    drop(hub);
+                    (pace.sleep)(every);
                 }
             });
+        match spawned {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                eprintln!("ikigai-gonk: THE SENSORS DO NOT RUN: no thread: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// How long after a start the first tick runs: one `every` after the last tick
+/// (`last_ms`), never later than one `every` from now (a stamp in the future, from a clock
+/// stepped back, waits one cadence, no more), and at once when that is already past or gonk
+/// stamped no tick.
+///
+/// ```
+/// use std::time::Duration;
+/// use ikigai_gonk::sensor::first_delay;
+/// let hour = Duration::from_secs(3600);
+/// let min = 60_000;
+/// // A restart 30 minutes after a tick: the next is 30 minutes out, not an hour.
+/// assert_eq!(first_delay(100 * min, Some(70 * min), hour), Duration::from_secs(30 * 60));
+/// // Overdue, or never stamped: at once.
+/// assert_eq!(first_delay(100 * min, Some(0), hour), Duration::ZERO);
+/// assert_eq!(first_delay(100 * min, None, hour), Duration::ZERO);
+/// // Stamped in the future: one cadence.
+/// assert_eq!(first_delay(100 * min, Some(500 * min), hour), hour);
+/// ```
+pub fn first_delay(now_ms: u64, last_ms: Option<u64>, every: Duration) -> Duration {
+    let Some(last) = last_ms else {
+        return Duration::ZERO;
+    };
+    let every_ms = u64::try_from(every.as_millis()).unwrap_or(u64::MAX);
+    let due = last.saturating_add(every_ms);
+    Duration::from_millis(due.saturating_sub(now_ms)).min(every)
+}
+
+/// The tick's clock, how it waits, and the file it stamps each tick's time into, so that a
+/// restart phases the first tick to the last one.
+#[derive(Clone)]
+pub struct Pace {
+    /// What "now" is.
+    pub clock: Arc<dyn ikigai_core::Clock>,
+    /// How the tick waits for a duration.
+    pub sleep: Arc<dyn Fn(Duration) + Send + Sync>,
+    /// The last tick's time, in milliseconds since the epoch, as one decimal line; `None` to
+    /// remember nothing across a restart.
+    pub stamp: Option<std::path::PathBuf>,
+}
+
+impl Pace {
+    /// The system clock and a real sleep, stamping into `stamp` — what the server runs on.
+    pub fn system(stamp: Option<std::path::PathBuf>) -> Pace {
+        Pace {
+            clock: Arc::new(ikigai_core::SystemClock),
+            sleep: Arc::new(std::thread::sleep),
+            stamp,
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        self.clock.now().as_millis()
+    }
+
+    /// The last tick's time, when the stamp holds one.
+    pub fn last_tick(&self) -> Option<u64> {
+        let text = std::fs::read_to_string(self.stamp.as_ref()?).ok()?;
+        text.trim().parse().ok()
+    }
+
+    /// Stamp a tick at `now_ms`, through a rename so a crash never leaves half a stamp. A
+    /// stamp that cannot be written is said, and the next restart ticks at once.
+    fn stamp_tick(&self, now_ms: u64) {
+        let Some(path) = &self.stamp else {
+            return;
+        };
+        let partial = path.with_extension("partial");
+        let written = std::fs::write(&partial, format!("{now_ms}\n"))
+            .and_then(|()| std::fs::rename(&partial, path));
+        if let Err(e) = written {
+            eprintln!(
+                "ikigai-gonk: the sensors' tick could not be stamped in {}: {e}",
+                path.display()
+            );
+        }
     }
 }
 

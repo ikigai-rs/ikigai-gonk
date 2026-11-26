@@ -1372,7 +1372,8 @@ impl Endpoint for Status {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         match inv.request.verb {
             Verb::Source => {
-                let json = matches!(inv.inline_str("as"), Ok(JSON));
+                let json =
+                    crate::web::response_face(inv, "text/plain", &["text/plain", JSON])? == JSON;
                 if json {
                     Ok(Representation::new(
                         ReprType::new(JSON).with_param("charset", "utf-8"),

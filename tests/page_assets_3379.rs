@@ -125,6 +125,7 @@ impl Server {
             passkeys: Some(keys),
             public,
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         std::thread::spawn(move || {
             let edge = face::route(doors::edge_config(door.clone()));

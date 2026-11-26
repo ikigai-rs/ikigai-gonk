@@ -207,6 +207,8 @@ impl Endpoint for Object {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let repo = &self.repository;
         granted(inv, &repo.name)?;
+        let face =
+            crate::web::response_face(inv, "application/json", &["application/json", "text/html"])?;
         let sha = inv
             .bindings
             .get("sha")
@@ -272,7 +274,7 @@ impl Endpoint for Object {
             None
         };
         value["href"] = href.map_or(Value::Null, Value::String);
-        if inv.inline_str("as").unwrap_or("application/json") == "text/html" {
+        if face == "text/html" {
             let kind = value["type"].as_str().unwrap_or("object");
             let sha = value["sha"].as_str().unwrap_or(sha);
             let mut html = format!("<section class='panel'><h1>Git {}</h1><p><code class='iri'>urn:git:{}:{}</code></p>", html_text(kind), html_text(kind), html_text(sha));
@@ -641,7 +643,7 @@ struct FileLink {
 #[async_trait]
 impl Endpoint for FileLink {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let path = inv.inline_str("path").unwrap_or("");
+        let path = inv.optional_str("path")?.unwrap_or("");
         let ok = !path.is_empty() && path.split('/').all(|s| !matches!(s, "" | "." | ".."));
         let href = ok
             .then(|| expand_file(&self.template, path))

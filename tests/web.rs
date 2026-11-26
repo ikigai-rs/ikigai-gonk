@@ -182,6 +182,7 @@ impl Server {
             passkeys: Some(passkeys),
             public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         let http_for_test = Arc::clone(&http);
         std::thread::spawn(move || {
@@ -2552,7 +2553,11 @@ fn sign_in(server: &Server, grant: &str, scopes: &[String]) -> (String, String) 
     assert_eq!(login.status, 200, "{login:?}");
     let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
     let token = v["session"].as_str().unwrap().to_string();
-    let iri = identity::passkey_iri(&URL_SAFE_NO_PAD.encode(&authenticator.id));
+    // ★ What the door stamps: the passkey's PERSON (ledger #4305).
+    let iri = identity::read_passkeys(&server.layout).unwrap()
+        [&URL_SAFE_NO_PAD.encode(&authenticator.id)]
+        .person
+        .clone();
     (token, iri)
 }
 
@@ -2587,8 +2592,9 @@ fn comment_as(server: &Server, iri: &str, id: &str, text: &str, cookie: Option<&
 /// ★ Ledger #76: a write from a signed-in browser carries its author. The door already knew
 /// who the session was (it minted the capability from that knowledge) and told nobody, so a
 /// decision comment typed while signed in landed "(unattributed)". Now the transport stamps
-/// the write with `principal` — the passkey's STABLE IRI — the ledger stamps it as committer and
-/// verified author (ledger #2836), and the face renders it as the passkey's CURRENT label.
+/// the write with `principal` — the STABLE IRI of the passkey's person (ledger #4305) — the
+/// ledger stamps it as committer and verified author (ledger #2836), and the face renders it as
+/// the person's CURRENT label.
 #[test]
 fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
     let server = Server::start();
@@ -2597,8 +2603,8 @@ fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
         "brian",
         &grants_for("default", Authority::Write).unwrap(),
     );
-    assert!(who.starts_with("urn:iki:gonk:passkey:"), "{who}");
-    let credential = who.rsplit(':').next().unwrap().to_string();
+    assert!(who.starts_with(identity::PERSON_IRI_PREFIX), "{who}");
+    let person = identity::person_id(&who).unwrap().to_string();
 
     let filed = server.form(
         &[
@@ -2619,7 +2625,7 @@ fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
     let graph = turtle(&server, &id);
     assert!(
         graph.matches(&format!("<{who}>")).count() >= 2,
-        "the item and its comment are both attributed to the passkey IRI: {graph}"
+        "the item and its comment are both attributed to the person IRI: {graph}"
     );
     assert!(
         graph.contains("committer"),
@@ -2641,7 +2647,9 @@ fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
         "{page:?}"
     );
     assert!(
-        !page.body.contains("urn:iki:gonk:passkey:") && !page.body.contains("unattributed"),
+        !page.body.contains("urn:iki:gonk:passkey:")
+            && !page.body.contains(identity::PERSON_IRI_PREFIX)
+            && !page.body.contains("unattributed"),
         "{page:?}"
     );
 
@@ -2667,18 +2675,27 @@ fn a_signed_in_form_write_is_attributed_to_the_passkey_and_renders_its_label() {
         "a relabel touches the store not at all"
     );
 
-    // A passkey since deleted still names its writes: the IRI's tail, never "unattributed".
+    // A person whose last passkey is deleted is still named (ledger #4305) ...
     let mut doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&clients).unwrap()).unwrap();
-    assert!(doc["passkeys"]
-        .as_object_mut()
+    let credential = doc["passkeys"]
+        .as_object()
         .unwrap()
-        .remove(&credential)
-        .is_some());
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    doc["passkeys"].as_object_mut().unwrap().remove(&credential);
+    std::fs::write(&clients, doc.to_string()).unwrap();
+    let page = server.page(&format!("/l/default/item/{id}"), None);
+    assert!(page.body.contains("by desk key"), "{page:?}");
+    // ... and a person since deleted still names its writes: the IRI's tail, never
+    // "unattributed".
+    doc["people"].as_object_mut().unwrap().remove(&person);
     std::fs::write(&clients, doc.to_string()).unwrap();
     let page = server.page(&format!("/l/default/item/{id}"), None);
     assert!(
-        page.body.contains(&format!("by {credential}")) && !page.body.contains("desk key"),
+        page.body.contains(&format!("by {person}")) && !page.body.contains("desk key"),
         "{page:?}"
     );
 }

@@ -83,8 +83,14 @@ impl Authenticator {
     }
 
     pub fn login_body(&self, challenge: &str, origin: &str, count: u32) -> String {
+        self.login_body_at(challenge, origin, "localhost", count)
+    }
+
+    /// [`Authenticator::login_body`] for the relying party `rp_id` (ledger #4367).
+    #[allow(dead_code)]
+    pub fn login_body_at(&self, challenge: &str, origin: &str, rp_id: &str, count: u32) -> String {
         let client = Self::client_data("webauthn.get", challenge, origin);
-        let mut auth = Sha256::digest(b"localhost").to_vec();
+        let mut auth = Sha256::digest(rp_id.as_bytes()).to_vec();
         auth.push(0x05); // user present + user verified
         auth.extend_from_slice(&count.to_be_bytes());
         let mut signed = auth.clone();

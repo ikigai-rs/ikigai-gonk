@@ -139,6 +139,17 @@ fn main() {
             grant,
             flags,
         } => passkey_add_grant(&key, by_label, &grant, &flags),
+        Command::PasskeyInvitePerson {
+            person,
+            minutes,
+            flags,
+        } => passkey_invite_person(&person, minutes, &flags),
+        Command::PasskeyAttach {
+            key,
+            by_label,
+            person,
+            flags,
+        } => passkey_attach(&key, by_label, &person, &flags),
         Command::PasskeyInvite {
             name,
             ledgers,
@@ -638,6 +649,17 @@ fn serve(flags: &config::Flags) -> ! {
         settings.backup.every,
     );
     trigger_spaces.push(Arc::new(system.space()));
+    // ★ What an upgraded install still needs (ledger #4369, `upgrade`): planned read-only once
+    // the hub exists, one line per plan that found something, and kept at its status.
+    let upgrade = ikigai_gonk::upgrade::Upgrade::new(
+        layout.clone(),
+        Arc::clone(&handle),
+        ikigai_gonk::upgrade::Commands {
+            config_home: homes.config.clone(),
+            socket: settings.socket.clone(),
+        },
+    );
+    trigger_spaces.push(Arc::new(upgrade.space()));
     // ★ The lapse sweep (ledger #3790, `lapse`): off unless `gonk.ledger.lapse.every` is set.
     // Its registry is built here, over the backup's timer, so its status can be bound; it is
     // started once the hub exists, and reads the ledgers out of the store each sweep.
@@ -648,8 +670,12 @@ fn serve(flags: &config::Flags) -> ! {
     ikigai_gonk::private_store_dir(dispatch_cursor_path.parent().expect("cursor directory"))
         .unwrap_or_else(|e| fail(&format!("cannot create private dispatch directory: {e}")));
     trigger_spaces.push(Arc::new(
-        ikigai_gonk::dispatch::space(Some(dispatch_cursor_path))
-            .unwrap_or_else(|e| fail(&e.to_string())),
+        ikigai_gonk::dispatch::space_with_former(Some(dispatch_cursor_path), {
+            // ★ A person keeps the cursor its passkey acknowledged before people (#4305).
+            let layout = layout.clone();
+            Arc::new(move |principal: &str| identity::former_principals(&layout, principal))
+        })
+        .unwrap_or_else(|e| fail(&e.to_string())),
     ));
     if let Some(record) = &record {
         trigger_spaces.push(record.space());
@@ -685,6 +711,11 @@ fn serve(flags: &config::Flags) -> ! {
     );
     scripts.attach(&hub);
     system.attach(&hub);
+    move_passkey_claims(&hub, &layout);
+    upgrade.attach(&hub);
+    for line in upgrade.lines() {
+        eprintln!("{line}");
+    }
     let onboard_line = match (&onboard, &settings.onboard) {
         (Some(onboard), Some(config)) => {
             onboard.attach(&hub);
@@ -714,7 +745,23 @@ fn serve(flags: &config::Flags) -> ! {
     ));
     let sensor_line = match settings.sensor_every {
         Some(every) => {
-            sensors.start(Arc::downgrade(&hub), every);
+            // The last tick's time, so a restart phases the first tick to it (ledger #4364).
+            let dir = homes.data.join("sensors");
+            let stamp = match ikigai_gonk::private_store_dir(&dir) {
+                Ok(()) => Some(dir.join("last-tick")),
+                Err(e) => {
+                    eprintln!(
+                        "ikigai-gonk: {}: {e}; each start ticks the sensors at once",
+                        dir.display()
+                    );
+                    None
+                }
+            };
+            sensors.start(
+                Arc::downgrade(&hub),
+                every,
+                ikigai_gonk::sensor::Pace::system(stamp),
+            );
             format!(
                 "every {} the published urn:script:{}* run as {} reads; a firing is a {} line{}",
                 humanize(every),
@@ -1032,9 +1079,25 @@ fn serve(flags: &config::Flags) -> ! {
             .unwrap_or(settings.http.port());
         // Sign-ins and sign-outs are written whatever `gonk.log.access` says: they are rare,
         // and they are the audit of who held a session (ledger #1824).
+        // ★ The public listener (ledger #4367): bound before anything is served, so a port
+        // already taken refuses the start rather than serving half the configuration.
+        let public_listener = match &settings.public_http {
+            Some(public) => Some(
+                tokio::net::TcpListener::bind(public.bind)
+                    .await
+                    .unwrap_or_else(|e| {
+                        fail(&format!("cannot bind the public http {}: {e}", public.bind))
+                    }),
+            ),
+            None => None,
+        };
         let passkeys = Passkeys::new(layout.clone(), port)
             .with_idle_seconds(settings.session_idle_seconds)
             .with_max_seconds(settings.session_max_seconds);
+        let passkeys = match &settings.public_http {
+            Some(public) => passkeys.with_public_site(identity::Site::public(&public.origin)),
+            None => passkeys,
+        };
         let passkeys = Arc::new(match &record {
             Some(record) => passkeys.auditing(Arc::clone(record)),
             None => passkeys,
@@ -1123,6 +1186,17 @@ fn serve(flags: &config::Flags) -> ! {
         if let Some(caveat) = doors::passkey_caveat(bound) {
             eprintln!("          ⚠ {caveat}");
         }
+        if let Some(public) = &settings.public_http {
+            system.listening("HTTP public", public.bind.to_string());
+            eprintln!(
+                "  public  {}/ — loopback {} for a TLS proxy only (`tailscale serve`); no \
+                 anonymous grant, `Host` and `Origin` must be this origin, passkeys registered \
+                 at `{}` only, `Secure` session cookie",
+                public.origin,
+                public.bind,
+                identity::Site::public(&public.origin).rp_id
+            );
+        }
         eprintln!("  browse  {browse_line}");
         eprintln!(
             "  toolbox {}",
@@ -1210,6 +1284,7 @@ fn serve(flags: &config::Flags) -> ! {
             bind: bound,
             passkeys: Some(passkeys),
             anonymous_sparql_budget_ms: settings.anonymous_sparql_budget_ms,
+            public_origin: None,
         };
         // Edge refusals write their own access lines (ledger #894).
         let edge = doors::edge_config_with(door.clone(), access(access::Door::Http));
@@ -1225,14 +1300,49 @@ fn serve(flags: &config::Flags) -> ! {
         // A browser navigating to an error gets it in gonk's own page, with the passkey
         // sign-in on it when signing in would cure it (ledger #2021).
         let edge = ikigai_gonk::refusal::install(edge, door.clone(), Arc::clone(&face));
-        let error = ikigai_web::serve_with_listener(
+        // ★ The public listener's door (ledger #4367): the same resolver, passkeys and public
+        // files, told apart by the port it is bound to — no anonymous grant there at all.
+        let public = public_listener.zip(settings.public_http.clone()).map(|(listener, at)| {
+            let door = doors::HttpDoor {
+                anonymous: Vec::new(),
+                bind: listener.local_addr().unwrap_or(at.bind),
+                public_origin: Some(identity::Site::public(&at.origin)),
+                ..door.clone()
+            };
+            let edge = doors::edge_config_with(door.clone(), access(access::Door::Http));
+            let edge = match settings.toolbox {
+                Some(_) => ikigai_gonk::toolbox::route(edge),
+                None => edge,
+            };
+            let edge = if settings.faces.is_empty() {
+                edge
+            } else {
+                ikigai_gonk::face::route(edge)
+            };
+            let edge = ikigai_gonk::refusal::install(edge, door.clone(), Arc::clone(&face));
+            ikigai_web::serve_with_listener(
+                Arc::clone(&http),
+                doors::http_cap(door),
+                listener,
+                edge,
+            )
+        });
+        let local = ikigai_web::serve_with_listener(
             http,
             doors::http_cap(door),
             listener,
             edge,
-        )
-        .await;
-        fail(&format!("the http door stopped: {error:?}"))
+        );
+        match public {
+            None => {
+                let error = local.await;
+                fail(&format!("the http door stopped: {error:?}"))
+            }
+            Some(public) => tokio::select! {
+                error = local => fail(&format!("the http door stopped: {error:?}")),
+                error = public => fail(&format!("the public http door stopped: {error:?}")),
+            },
+        }
     })
 }
 
@@ -1725,6 +1835,42 @@ fn backfill_keys(args: &ikigai_gonk::keys::BackfillArgs) {
     let issue = ikigai_gonk::keys::over_socket(&socket).unwrap_or_else(|e| fail(&e));
     ikigai_gonk::keys::run(&issue, &ledger, args.dry_run, &mut std::io::stdout())
         .unwrap_or_else(|e| fail(&e));
+}
+
+/// ★ Claims held under a passkey IRI move to its person (ledger #4305,
+/// [`ikigai_gonk::person_claims`]) before any door opens, so the person the door now stamps
+/// can renew, release and close what its passkey took. Not fatal: a claim not moved stays
+/// its passkey's, and the line says so.
+fn move_passkey_claims(hub: &Arc<ikigai_core::Kernel>, layout: &quic::Layout) {
+    let people = match identity::passkey_people(layout) {
+        Ok(people) => people,
+        Err(e) => {
+            eprintln!("ikigai-gonk: claims were not moved to people: {e}");
+            return;
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("ikigai-gonk: claims were not moved to people: no runtime: {e}");
+            return;
+        }
+    };
+    let issue = |request: ikigai_core::Request| {
+        let iri = request.target.as_str().to_string();
+        runtime
+            .block_on(hub.issue(request, &ikigai_core::Capability::root()))
+            .map(|answer| answer.bytes.to_vec())
+            .map_err(|e| format!("{iri}: {e}"))
+    };
+    match ikigai_gonk::person_claims::run(&issue, &people) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("ikigai-gonk: moved {n} claim(s) from a passkey to its person"),
+        Err(e) => eprintln!("ikigai-gonk: claims were not moved to people: {e}"),
+    }
 }
 
 /// `ikigai-gonk ledger canonical-file-iris` — over the socket of the gonk this config describes
@@ -2374,6 +2520,7 @@ fn passkey_list(flags: &config::Flags) {
     // ★ Ledger #3401: each passkey's grant scopes AS STORED, so a scope `--scope` wrote (or a
     // `--force` dropped) is visible without opening grants.json.
     let grants = quic::read_grants(&layout.grants_json());
+    let labels = identity::author_labels(&layout);
     for entry in enrolled.values() {
         let word = if entry.grants.len() == 1 {
             "grant "
@@ -2386,6 +2533,12 @@ fn passkey_list(flags: &config::Flags) {
             entry.grant_names(),
             entry.credential_id,
             identity::passkey_iri(&entry.credential_id)
+        );
+        // ★ Ledger #4305: the person it names, whose grants these are.
+        println!(
+            "  person {}  {}",
+            labels.get(&entry.person).unwrap_or(&entry.label),
+            entry.person
         );
         for grant in &entry.grants {
             match grants.as_ref().map(|grants| grants.get(grant)) {
@@ -2474,6 +2627,67 @@ fn passkey_add_grant(key: &str, by_label: bool, grant: &str, flags: &config::Fla
     println!(
         "  recorded in {}. grants.json and every other passkey are unchanged",
         identity::audit_log(&layout).display()
+    );
+}
+
+/// `ikigai-gonk passkey attach <label> | --credential <id> --person <person>` (ledger #4305):
+/// make one enrolled passkey name another person.
+fn passkey_attach(key: &str, by_label: bool, person: &str, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let which = if by_label {
+        identity::Which::Label(key)
+    } else {
+        identity::Which::Credential(key)
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let (now, before) =
+        identity::attach(&layout, which, person, now_ms).unwrap_or_else(|e| fail(&e));
+    let labels = identity::author_labels(&layout);
+    let label_of = |iri: &str| labels.get(iri).cloned().unwrap_or_else(|| iri.to_string());
+    println!(
+        "passkey `{}` ({}) now names person `{}` ({}) and holds its grants {} — effective at \
+         its next request",
+        now.label,
+        identity::passkey_iri(&now.credential_id),
+        label_of(&now.person),
+        now.person,
+        now.grant_names(),
+    );
+    println!(
+        "  person `{}` ({before}) is kept: what it wrote still reads as it",
+        label_of(&before)
+    );
+    println!("  recorded in {}", identity::audit_log(&layout).display());
+}
+
+/// `ikigai-gonk passkey invite --person <person>` (ledger #4305): an invite for a new passkey
+/// of an existing person.
+fn passkey_invite_person(person: &str, minutes: u64, flags: &config::Flags) {
+    let homes = Homes::resolve(flags).unwrap_or_else(|e| fail(&e));
+    let settings = read_settings(flags);
+    let layout = quic::Layout::in_config_home(&homes.config);
+    let (base, warning) = doors::invite_base(settings.http).unwrap_or_else(|e| fail(&e));
+    let (code, iri, who) =
+        identity::invite_person(&layout, person, minutes, identity::now_seconds())
+            .unwrap_or_else(|e| fail(&e));
+    println!(
+        "passkey invite for a new passkey of person `{}` ({iri}) — it holds that person's \
+         grants {}",
+        who.label,
+        who.grants.join(", ")
+    );
+    println!("  valid for {minutes} minutes, once");
+    println!("  open  {base}#invite={code}");
+    if let Some(warning) = warning {
+        println!("  ⚠ {warning}");
+    }
+    println!(
+        "  in a browser on this machine (localhost, not 127.0.0.1); the passkey is enrolled in {}",
+        layout.clients_json().display()
     );
 }
 

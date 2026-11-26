@@ -332,11 +332,27 @@ const CHROME_ACCEPT: &str =
 /// A scratch gonk HTTP door with the Layers page bound over `view`.
 struct Gonk {
     addr: SocketAddr,
+    http: Arc<Kernel>,
+    page_space: Arc<dyn ikigai_core::Space>,
     layout: quic::Layout,
     _config: tempfile::TempDir,
 }
 
 impl Gonk {
+    fn invoke(&self, req: &Request) -> Result<Representation, Error> {
+        use ikigai_core::{Invocation, Resolution, Scope};
+        let Resolution::Hit(route) = self.page_space.resolve(req, &Scope::empty()) else {
+            panic!("missing endpoint for {}", req.target);
+        };
+        let cap = Capability::root();
+        block_on(route.endpoint.invoke(&Invocation::with_issuer(
+            req,
+            &route.bindings,
+            &cap,
+            &*self.http,
+        )))
+    }
+
     fn start(view: Option<Arc<LayersView>>, anonymous: Vec<String>) -> Gonk {
         Gonk::start_logged(view, anonymous, None)
     }
@@ -373,17 +389,21 @@ impl Gonk {
             inquiry: None,
         });
         let pages = layers_view::bind(web::space(Arc::clone(&face)), &face, view);
-        let http = Arc::new(doors::http_kernel_with(Arc::clone(&hub), pages, access));
+        let (http, page_space) =
+            doors::http_kernel_serving_with_space(Arc::clone(&hub), pages, vec![], access);
+        let http = Arc::new(http);
+        let serving = Arc::clone(&http);
         let door = doors::HttpDoor {
             anonymous,
             bind: addr,
             passkeys: Some(passkeys),
             public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         std::thread::spawn(move || {
             runtime.block_on(ikigai_web::serve_with_listener(
-                http,
+                serving,
                 doors::http_cap(door.clone()),
                 listener,
                 doors::edge_config(door),
@@ -391,6 +411,8 @@ impl Gonk {
         });
         Gonk {
             addr,
+            http,
+            page_space,
             layout,
             _config: config,
         }
@@ -1711,4 +1733,63 @@ fn the_layers_polls_write_sampled_lines() {
         "{lines:#?}"
     );
     assert_eq!(of(layers_view::PAGE_IRI, "ok"), 1, "{lines:#?}");
+}
+
+#[test]
+fn the_layers_overview_poll_does_not_read_a_bad_seen_count_as_zero() {
+    let view = LayersView::new(Arc::new(Down), "quic://nowhere:1".into(), None, quick());
+    let gonk = Gonk::start(Some(view), tokens());
+    for path in ["/layers/~/wait?after=0", "/layers/~/wait?after=0&seen=5"] {
+        let page = gonk.htmx(path);
+        assert_eq!(page.status, 200, "{page:?}");
+    }
+    let refusal = gonk.htmx("/layers/~/wait?after=0&seen=five");
+    assert_eq!(refusal.status, 400, "{refusal:?}");
+    assert!(
+        refusal.body.contains("seen") && refusal.body.contains("non-negative integer"),
+        "{refusal:?}"
+    );
+}
+
+#[test]
+fn layers_pages_refuse_unreadable_reply_and_poll_arguments() {
+    let host = Host::open();
+    let gonk = Gonk::start(Some(view_as(&host, "brian", None)), tokens());
+    let first = host.message("bobby", "talk", "A message to reply to");
+    let id = first.rsplit(':').next().unwrap();
+    let req = Request::new(
+        Verb::Source,
+        Iri::parse("urn:iki:gonk:page:layer:talk").unwrap(),
+    );
+    let wait = Request::new(Verb::Source, Iri::parse(layers_view::WAIT_IRI).unwrap())
+        .with_arg("after", ArgRef::Inline(b"0".to_vec()));
+    let ordinary = gonk.page("/layers/talk");
+    assert_eq!(ordinary.status, 200, "{ordinary:?}");
+    assert!(ordinary.body.contains("id='say'"), "{ordinary:?}");
+    let reply = gonk.page(&format!("/layers/talk?reply={id}"));
+    assert_eq!(reply.status, 200, "{reply:?}");
+    assert!(reply.body.contains(&first), "{reply:?}");
+
+    for (request, name) in [
+        (&req, "reply"),
+        (&wait, "layer"),
+        (&wait, "seen"),
+        (&wait, "kind"),
+        (&wait, "door"),
+    ] {
+        for arg in [
+            ArgRef::Inline(vec![0xff]),
+            ArgRef::Reference(Iri::parse("urn:test:value").unwrap()),
+            ArgRef::Content(ikigai_core::ContentId::of(b"value")),
+        ] {
+            let result = gonk
+                .invoke(&request.clone().with_arg(name, arg))
+                .map(|rep| rep.repr_type.media_type);
+            assert!(
+                matches!(&result, Err(Error::InvalidArgument { name: actual, .. })
+                if actual == name),
+                "{result:?}"
+            );
+        }
+    }
 }

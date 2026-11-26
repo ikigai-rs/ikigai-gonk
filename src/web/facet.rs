@@ -297,10 +297,10 @@ fn bindings(bytes: &[u8]) -> Result<Vec<Value>> {
 #[async_trait]
 impl Endpoint for Facet {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
-        let json = match inv.inline_str("as").map(bare) {
-            Ok(JSON) => true,
-            Ok(HTML) | Err(_) => false,
-            Ok(asked) => {
+        let json = match inv.optional_str("as")?.map(bare) {
+            Some(JSON) => true,
+            Some(HTML) | None => false,
+            Some(asked) => {
                 return Err(Error::InvalidArgument {
                     name: "as".to_string(),
                     detail: format!("`{asked}` is not a face this resource serves: {HTML}, {JSON}"),
@@ -309,16 +309,16 @@ impl Endpoint for Facet {
         };
         let ledger = Ledger::parse(&binding(inv, "ledger")?)?;
         require_read(inv.capability, &ledger)?;
-        let status = optional(inv, "status").unwrap_or_else(|| "open".into());
-        let text = optional(inv, "text");
-        let labels = optional(inv, "labels");
-        let without = optional(inv, "without");
-        let limit = optional(inv, "limit");
-        let ledgers = optional(inv, "ledgers");
-        let projects = optional(inv, "projects");
-        let priority = optional(inv, "priority");
-        let sort = optional(inv, "sort");
-        let phrase = optional(inv, "phrase").filter(|p| !p.trim().is_empty());
+        let status = optional_nonblank(inv, "status")?.unwrap_or_else(|| "open".into());
+        let text = optional_nonblank(inv, "text")?;
+        let labels = optional_nonblank(inv, "labels")?;
+        let without = optional_nonblank(inv, "without")?;
+        let limit = optional_nonblank(inv, "limit")?;
+        let ledgers = optional_nonblank(inv, "ledgers")?;
+        let projects = optional_nonblank(inv, "projects")?;
+        let priority = optional_nonblank(inv, "priority")?;
+        let sort = optional_nonblank(inv, "sort")?;
+        let phrase = optional_nonblank(inv, "phrase")?;
         let listing = Listing {
             status: &status,
             text: text.as_deref(),
@@ -446,7 +446,7 @@ impl Endpoint for Facet {
                 .collect()
         };
         let (label_chunks, priority_chunks) = (chunked(&labels), chunked(&priorities));
-        let full = optional(inv, "page").as_deref() == Some("true");
+        let full = optional_nonblank(inv, "page")?.as_deref() == Some("true");
         let mut content = if full {
             nav(
                 &self.web,

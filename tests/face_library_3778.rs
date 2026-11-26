@@ -80,6 +80,7 @@ impl Server {
             passkeys: Some(passkeys),
             public,
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         let edge = face::route(doors::edge_config(door.clone()));
         let cap = doors::http_cap(door);

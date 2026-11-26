@@ -341,6 +341,7 @@ fn the_http_door_grants_its_ledgers_to_loopback_and_nothing_more() {
         passkeys: Some(passkeys),
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     let cap = doors::http_cap(door.clone());
     let edge = doors::edge_config(door.clone());
@@ -508,6 +509,7 @@ fn the_public_http_door_cannot_reach_the_backup_family() {
         passkeys: Some(passkeys),
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     std::thread::spawn(move || {
         runtime.block_on(ikigai_web::serve_with_listener(
@@ -602,6 +604,7 @@ fn the_http_door_takes_the_librarys_edge_bounds() {
         passkeys: None,
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     });
     assert_eq!(config.header_timeout, ikigai_web::DEFAULT_HEADER_TIMEOUT);
     assert_eq!(config.body_timeout, ikigai_web::DEFAULT_BODY_TIMEOUT);
@@ -770,6 +773,7 @@ fn every_route_the_http_door_serves_is_a_gonk_path() {
         passkeys: None,
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     }));
     assert!(!config.routes.routes.is_empty());
     for route in &config.routes.routes {

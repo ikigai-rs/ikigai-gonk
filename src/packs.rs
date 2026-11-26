@@ -1077,10 +1077,8 @@ impl Endpoint for DescriptionEndpoint {
     async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
         let root = web::binding(inv, "root")?;
         let asked = inv
-            .inline_str("as")
-            .ok()
+            .optional_str("as")?
             .map(|a| a.split(';').next().unwrap_or(a).trim().to_string())
-            .filter(|a| !a.is_empty())
             .unwrap_or_else(|| TURTLE.to_string());
         if asked != TURTLE && asked != JSON {
             return Err(Error::InvalidArgument {
