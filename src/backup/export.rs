@@ -23,6 +23,8 @@
 //!   not a complete export.
 //! - **Time**: the budget counts the work of producing a window, not the time the consumer
 //!   takes to read it, so a slow link does not refuse an export a fast one completes.
+//! - **No total ceiling**: only each window is bounded, so the whole stream has no ceiling
+//!   beyond them. A 5,000,000-quad ledger is about 928 MiB of N-Quads.
 //! - **Concurrency**: at most [`EXPORTS_IN_FLIGHT`] exports read at once on this server; one
 //!   past that is refused `RetryAfter`. The export reads the store's snapshot directly, as the
 //!   backup does, so the store's own evaluation slots do not count it.
@@ -177,9 +179,12 @@ impl Endpoint for ExportGraph {
                  caller's answer grants, and each window must be produced within the caller's \
                  time budget. A quad too large for a window, a window past the time budget, or \
                  a read error ends the stream with an error: the chunks before it are not a \
-                 complete export. At most two exports read at once; another is refused \
-                 RetryAfter. `urn:iki:store:load` with `format=application/n-quads` reads it \
-                 back.",
+                 complete export. The streamed total has no ceiling beyond those per-window \
+                 bounds: a 5,000,000-quad ledger is about 928 MiB. At most two exports read at \
+                 once; another is refused RetryAfter. Reading an export back is the operator's \
+                 restore path, not the tenant's: no tenant grant holds a raw write of a ledger \
+                 graph, and `urn:iki:store:load` with `format=application/n-quads` is bounded \
+                 per call, so an operator loads a large export in pieces.",
             )
             .verb(Verb::Source)
             .verb(Verb::Meta)

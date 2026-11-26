@@ -6,7 +6,8 @@
 //! store's streaming dump needs the broad read no tenant may hold. Over a graph of 120,000
 //! quads and about 20 MiB of N-Quads, both refuse. The rest is the fix,
 //! `urn:iki:gonk:export:graph`: the same graph, whole, under the same grant, as a stream, at the
-//! hub and through a real QUIC door; another graph refused; a window past the time budget
+//! hub and through a real QUIC door (under a tenant's `Read`, and under an owner's `Write` and
+//! a worker's `Worker`, whose grants the raw-read rule narrows); another graph refused; a window past the time budget
 //! refused rather than truncated.
 //!
 //! The 5,000,000-quad run is `#[ignore]`d (minutes in a debug build, beside a suite CI already
@@ -245,11 +246,31 @@ fn a_window_past_the_time_budget_ends_the_stream_with_an_error() {
 /// the overlay's buffered path this graph is refused `OverBudget`.
 #[test]
 fn a_tenant_exports_its_whole_graph_through_the_quic_door() {
+    exports_through_the_quic_door(Authority::Read);
+}
+
+/// A ledger's owner exports it past 64 MiB at the QUIC door too. Its grant also holds the
+/// participants graph's read token, which the raw-read rule takes away, so the overlay
+/// NARROWS this call: before the fix a narrowed call was re-issued under the narrower
+/// capability and collected, and refused `OverBudget` past the run's 64 MiB.
+#[test]
+fn a_ledger_owner_exports_its_whole_graph_through_the_quic_door() {
+    exports_through_the_quic_door(Authority::Write);
+}
+
+/// A worker's grant is narrowed the same way as [`Authority::Write`]'s, and streams the same.
+#[test]
+fn a_worker_exports_its_whole_graph_through_the_quic_door() {
+    exports_through_the_quic_door(Authority::Worker);
+}
+
+fn exports_through_the_quic_door(authority: Authority) {
     let dir = tempfile::tempdir().unwrap();
     let layout = quic::Layout::in_config_home(dir.path());
     let (server, _) = quic::server_identity(&layout).unwrap();
     let client = quic::add_client(&layout, "acme", None, false).unwrap();
-    let grant = grants_for("acme", Authority::Read).unwrap();
+    let grant = grants_for("acme", authority).unwrap();
+    let caller = Capability::scoped(grant.clone());
     quic::enrol(&layout, "acme", &client.fingerprint, &grant, false).unwrap();
     let trusted: Vec<String> = quic::trusted_client_certs(&layout)
         .unwrap()
@@ -299,13 +320,15 @@ fn a_tenant_exports_its_whole_graph_through_the_quic_door() {
     let mut streamed = resolver
         .issue_streamed(
             export_request(ACME),
-            &tenant(),
+            &caller,
             &ikigai_resolve::RunContext::default(),
             None,
         )
-        .expect("the export over QUIC");
+        .unwrap_or_else(|e| panic!("the export over QUIC under {authority:?}: {e:?}"));
     let mut out = Vec::new();
-    streamed.copy_to(&mut out).expect("the whole stream");
+    streamed
+        .copy_to(&mut out)
+        .unwrap_or_else(|e| panic!("the whole stream under {authority:?}: {e:?}"));
     let mut drained = Drained::default();
     count(&out, &mut drained);
     assert_eq!(
@@ -320,7 +343,7 @@ fn a_tenant_exports_its_whole_graph_through_the_quic_door() {
     // And another tenant's graph is refused at the door, as a raw read is.
     let refused = resolver.issue_streamed(
         export_request(OTHER),
-        &tenant(),
+        &caller,
         &ikigai_resolve::RunContext::default(),
         None,
     );

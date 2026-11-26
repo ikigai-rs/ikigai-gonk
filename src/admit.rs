@@ -986,8 +986,6 @@ struct Admitted {
 }
 
 impl Admitted {
-    /// Answer this invocation's request under its capability, or one level down under the
-    /// narrower one rule 5 found.
     /// Rules 1, 5 and 6 for `inv`, every one a request's reads go through: refused, or the
     /// scopes to answer it under when a rule narrowed them (`None`: as it arrived).
     fn admit_read(&self, inv: &Invocation<'_>) -> Result<Option<Vec<String>>> {
@@ -1027,6 +1025,8 @@ impl Admitted {
         })
     }
 
+    /// Answer this invocation's request under its capability, or one level down under the
+    /// narrower one rule 5 found.
     async fn answer(
         &self,
         inv: &Invocation<'_>,
@@ -1086,13 +1086,22 @@ impl Endpoint for Admitted {
             return foreign_page_explained(answer, inv.depth() == 0, inv.capability);
         }
         // ★ A graph export (ledger #3649) is judged by every rule a read is, and then streamed
-        // at any door. Only a call a rule NARROWED is answered by re-issuing it under the
-        // narrower capability, which collects: core offers no attenuated body issue.
-        if self.inner.name() == EXPORT_ID
-            && !inv.request.verb.is_mutating()
-            && self.admit_read(inv)?.is_none()
-        {
-            let answer = self.inner.invoke_body(inv).await;
+        // at any door, under the capability those rules leave it. A call a rule NARROWED is
+        // NOT re-issued as `invoke` does (core offers no attenuated body issue, so that path
+        // collects, and an owner's or a worker's export, whose grants rule 6 always narrows,
+        // would be refused past the run's byte budget). It is judged here as the next depth
+        // would judge it, and streamed under the narrower capability: the export reads only
+        // the one graph it names, by that capability's token, and issues no sub-request, so
+        // an invocation detached from the kernel loses it nothing.
+        if self.inner.name() == EXPORT_ID && !inv.request.verb.is_mutating() {
+            let answer = match self.admit_read(inv)? {
+                None => self.inner.invoke_body(inv).await,
+                Some(scopes) => {
+                    let narrowed = narrowed_for_export(inv, scopes)?;
+                    let detached = Invocation::detached(inv.request, inv.bindings, &narrowed);
+                    self.inner.invoke_body(&detached).await
+                }
+            };
             return foreign_page_explained(answer, inv.depth() == 0, inv.capability);
         }
         self.invoke(inv).await.map(Representation::into_body)
@@ -1117,6 +1126,31 @@ impl Endpoint for Admitted {
 
 /// Whether rule 6 reads this request: below root, on a door or family that reads graphs raw. A
 /// contract (`Meta`) reads none.
+/// The capability a graph export a rule narrowed to `scopes` is streamed under: those scopes,
+/// judged by rule 6 as a re-issued call would be at the next depth (refused when the narrower
+/// capability may not read the graph raw, its hidden tokens taken away), and refused when it
+/// no longer holds the read of the graph the export names. The export checks that read again
+/// itself; this says it at the door, before a slot is taken.
+fn narrowed_for_export(inv: &Invocation<'_>, scopes: Vec<String>) -> Result<Capability> {
+    let narrowed = inv.capability.attenuate(scopes);
+    if let Some(why) = raw_read_refusal(inv.request, EXPORT_ID, &narrowed) {
+        return Err(Error::Denied(why.into()));
+    }
+    let narrowed = match raw_read_scopes(&narrowed) {
+        Some(kept) => narrowed.attenuate(kept),
+        None => narrowed,
+    };
+    let graph = inv.inline_str("graph")?;
+    let token = ikigai_store::cap_read_graph(graph);
+    if !(narrowed.allows(&token) || narrowed.allows(ikigai_store::CAP_READ)) {
+        return Err(Error::Denied(
+            format!("exporting {graph} needs {token}, which this client's grant no longer holds")
+                .into(),
+        ));
+    }
+    Ok(narrowed)
+}
+
 fn raw_read_applies(id: &str, inv: &Invocation<'_>) -> bool {
     !inv.capability.is_root() && inv.request.verb != Verb::Meta && is_raw_read(id)
 }
