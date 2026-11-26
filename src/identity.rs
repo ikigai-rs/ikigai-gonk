@@ -250,8 +250,12 @@ pub enum SignedIn<'a> {
     /// A session token.
     Token(&'a str),
     /// The capability's principal ([`passkey_iri`] or [`person_iri`]), if any, and no session
-    /// key: the newest live session of any passkey it stands for. A caller that has the
-    /// request's session key passes [`SignedIn::Session`] instead.
+    /// key. ★ A principal says WHO, never WHICH session, so [`Passkeys::signed_in`] answers it
+    /// with no session at all. It used to answer, and restart the idle clock of, the newest
+    /// live session of any passkey the principal stands for, which kept another device's
+    /// session alive and told this request that session's bounds. A caller that has the
+    /// request's session key passes [`SignedIn::Session`]; a re-assertion may still name its
+    /// session by `sessionId` beside a principal ([`Passkeys::reassert_options`]).
     Principal(Option<&'a str>),
     /// The HTTP door's request (ledger #4363): the key of the session its cookie names (the
     /// [`session_id`] of the token, which the door puts in the capability) and the principal
@@ -347,7 +351,8 @@ pub const INVITE_MINUTES: u64 = 30;
 
 /// The most sessions held at once. ★ The bound REFUSES past it rather than evicting: an
 /// evicted session would sign someone out with an error that names nothing. Only a passkey
-/// can open a session, so no anonymous caller can fill it.
+/// can open a session, so no anonymous caller can fill it, and since
+/// [`MAX_SESSIONS_PER_PASSKEY`] no single passkey can either.
 ///
 /// ★ Challenges are NOT bounded by it, because they are not held (ledger
 /// [#2804](http://localhost:1062/l/default/item/2804)). Any process on this machine may mint
@@ -359,6 +364,15 @@ pub const INVITE_MINUTES: u64 = 30;
 /// after a passkey signed it or an invite enrolled it — so only what a credential holder does
 /// can grow memory.
 pub const MAX_PENDING: usize = 256;
+
+/// The most sessions one passkey holds at once. ★ Past it, a sign-in by that passkey ENDS its
+/// own oldest session (in `Passkeys::open_session`), so the person signing in again is the only
+/// one signed out, on a device they used least recently. Without it [`MAX_PENDING`] counted
+/// every passkey's sessions together, and one passkey signing in that many times (an enrolled
+/// collaborator's, read-only included) refused every other passkey's sign-in. With it, filling
+/// [`MAX_PENDING`] takes `MAX_PENDING / MAX_SESSIONS_PER_PASSKEY` enrolled passkeys, and
+/// enrolling one takes an invite only the owner issues.
+pub const MAX_SESSIONS_PER_PASSKEY: usize = 16;
 
 /// The IRI prefix a signed-in passkey is NAMED by when the door stamps a write — the
 /// `principal` the HTTP transport attaches (see [`crate::doors::http_principal`]), and the
@@ -2627,8 +2641,28 @@ impl Passkeys {
         let before = state.sessions.len();
         state.sessions.retain(|_, s| s.over(now, idle).is_none());
         state.dirty |= state.sessions.len() != before;
+        // ★ This passkey's own oldest sessions make room for this one
+        // ([`MAX_SESSIONS_PER_PASSKEY`]); every other passkey's are untouched. A table an older
+        // release wrote with more than the bound shrinks here, at this passkey's next sign-in.
+        let mut own: Vec<(u64, u64, String)> = state
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.credential_id == enrolled.credential_id)
+            .map(|(key, s)| (s.issued, s.last_seen, key.clone()))
+            .collect();
+        let surplus = (own.len() + 1).saturating_sub(MAX_SESSIONS_PER_PASSKEY);
+        let mut replaced = 0;
+        if surplus > 0 {
+            own.sort_unstable();
+            for (_, _, key) in own.into_iter().take(surplus) {
+                replaced += usize::from(state.sessions.remove(&key).is_some());
+            }
+            state.dirty = true;
+        }
         if state.sessions.len() >= MAX_PENDING {
             self.save(&mut state);
+            drop(state);
+            self.log_replaced(&enrolled.credential_id, replaced);
             return Err(format!("{MAX_PENDING} sessions are already open"));
         }
         state.sessions.insert(
@@ -2644,6 +2678,8 @@ impl Passkeys {
         );
         state.dirty = true;
         self.save(&mut state);
+        drop(state);
+        self.log_replaced(&enrolled.credential_id, replaced);
         Ok((
             token,
             Identity {
@@ -2654,6 +2690,26 @@ impl Passkeys {
                 restore: Vec::new(),
             },
         ))
+    }
+
+    /// The `gonk:Logout` line for the `replaced` sessions of `credential_id` a sign-in ended to
+    /// stay within [`MAX_SESSIONS_PER_PASSKEY`]; none when it ended none.
+    fn log_replaced(&self, credential_id: &str, replaced: usize) {
+        if replaced == 0 {
+            return;
+        }
+        self.audit(
+            LOGOUT_CLASS,
+            AuditLine {
+                op: "login",
+                door: "http",
+                outcome: "ok",
+                credential: Some(credential_id),
+                authenticated: true,
+                sessions: replaced,
+                why: Some("session-bound"),
+            },
+        );
     }
 
     /// What redeeming `invite` while signed in with the session `token` would add, spending
@@ -3105,9 +3161,8 @@ impl Passkeys {
     pub fn signed_in(&self, who: SignedIn<'_>, now: u64) -> Option<Identity> {
         match who {
             SignedIn::Token(token) => self.identity(token, now),
-            SignedIn::Principal(principal) => {
-                self.identity_of_any(&self.credentials_of(principal?), now)
-            }
+            // ★ A principal alone names no session ([`SignedIn::Principal`]).
+            SignedIn::Principal(_) => None,
             SignedIn::Session { key, principal } => {
                 let credentials = principal.map(|p| self.credentials_of(p));
                 let credential = self.session_credential(key)?;
@@ -3161,32 +3216,6 @@ impl Passkeys {
     /// holds authentication only.) A live session's idle clock restarts.
     pub fn identity(&self, token: &str, now: u64) -> Option<Identity> {
         self.identity_at(sha256_hex(token.as_bytes()), now)
-    }
-
-    /// The identity of the passkey `credential_id` through its newest live session, or `None`
-    /// when it has none: [`Passkeys::identity`] for a caller who holds no token, because the
-    /// cookie is HttpOnly and the door has already named the passkey from it (the
-    /// capability's principal, [`passkey_iri`]).
-    pub fn identity_of(&self, credential_id: &str, now: u64) -> Option<Identity> {
-        self.identity_of_any(&[credential_id.to_string()], now)
-    }
-
-    /// [`Passkeys::identity_of`] over several passkeys — a person's ([`Passkeys::credentials_of`]):
-    /// the newest live session of any of them.
-    pub fn identity_of_any(&self, credential_ids: &[String], now: u64) -> Option<Identity> {
-        let mut keys: Vec<(u64, String)> = {
-            let mut state = self.state.lock().ok()?;
-            self.read_log(&mut state);
-            state
-                .sessions
-                .iter()
-                .filter(|(_, s)| credential_ids.contains(&s.credential_id))
-                .map(|(key, s)| (s.issued, key.clone()))
-                .collect()
-        };
-        keys.sort_unstable_by(|a, b| b.cmp(a));
-        keys.into_iter()
-            .find_map(|(_, key)| self.identity_at(key, now))
     }
 
     /// End EVERY session of the passkey `credential_id` — what signing out does now that the
@@ -3700,6 +3729,151 @@ mod tests {
         state.dirty = true;
         rp.save(&mut state);
         token
+    }
+
+    /// What the passkey resource is asked when a request's capability carries the principal
+    /// the HTTP door stamped from the cookie but not the key of the session that cookie names:
+    /// a request that reached it by any route but `/auth/{op}` (the mechanical
+    /// `/iki/gonk/passkey/{op}`, or a `/k` command), so `doors::session_marker` is not in it.
+    fn principal_only_session_get(rp: &Passkeys, token: &str, now: u64) -> Option<Identity> {
+        let who = rp.identity(token, now)?;
+        let iri = passkey_iri(&who.enrolled.credential_id);
+        rp.signed_in(SignedIn::Principal(Some(&iri)), now)
+    }
+
+    /// One browser's requests keep only ITS session alive. Session `a` (this laptop) keeps
+    /// polling; session `b` of the same passkey (a machine left signed in elsewhere) carries no
+    /// request at all, and ends at the idle bound. It used to be kept alive: a request that
+    /// named the passkey but not its session was answered from, and refreshed, the passkey's
+    /// NEWEST session.
+    #[test]
+    fn one_sessions_requests_do_not_keep_another_session_of_the_passkey_alive() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060).with_idle_seconds(600);
+        let a = session_for(&rp, "c2FtZQ", 1_000);
+        let b = session_for(&rp, "c2FtZQ", 1_010);
+        let mut now = 1_010;
+        while now < 1_010 + 3 * 600 {
+            now += 300;
+            assert!(rp.identity(&a, now).is_some(), "a is busy at {now}");
+            let _ = principal_only_session_get(&rp, &a, now);
+        }
+        assert!(
+            rp.identity(&b, now).is_none(),
+            "session b carried no request for {} s, past the 600 s idle bound, and is still live",
+            now - 1_010
+        );
+        assert!(rp.identity(&a, now).is_some(), "a stays signed in");
+    }
+
+    /// A request is told about its OWN session or none, never about a later sign-in of the
+    /// same passkey elsewhere: a page whose write has lapsed must not be told it may write.
+    #[test]
+    fn the_session_answer_is_the_cookies_own_session_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060)
+            .with_idle_seconds(READ_ONLY_SESSION_SECONDS)
+            .with_max_seconds(READ_ONLY_SESSION_SECONDS);
+        let old = session_for(&rp, "c2FtZQ", 1_000);
+        let _new = session_for(&rp, "c2FtZQ", 1_000 + SESSION_SECONDS - 60);
+        let now = 1_000 + SESSION_SECONDS + 60;
+        // What the door's capability holds for `old`: write has lapsed.
+        let held = rp.identity(&old, now).expect("old reads on");
+        assert_eq!(held.write_seconds(now), 0, "old's write lapsed");
+        // What the request is told when the passkey resource has only the principal.
+        let told = principal_only_session_get(&rp, &old, now);
+        assert_eq!(
+            told.as_ref().map(|t| t.write_seconds(now)).unwrap_or(0),
+            0,
+            "the page is told it may still write, while its own capability cannot"
+        );
+        assert!(told.is_none(), "a principal alone names no session");
+        // With the session's key, as `/auth/{op}` carries it, the answer is old's own.
+        let iri = passkey_iri("c2FtZQ");
+        let key = session_id(&old);
+        let own = rp
+            .signed_in(
+                SignedIn::Session {
+                    key: &key,
+                    principal: Some(&iri),
+                },
+                now,
+            )
+            .expect("old's own session");
+        assert_eq!(own.write_seconds(now), 0);
+    }
+
+    /// One enrolled passkey (a collaborator's read-only one, say) cannot hold every session
+    /// slot. It signs in [`MAX_PENDING`] times and keeps them; the owner's next sign-in still
+    /// opens. It used to be refused, because the bound counted every passkey's sessions together.
+    #[test]
+    fn one_passkey_signing_in_many_times_does_not_refuse_another_passkeys_sign_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060);
+        for _ in 0..MAX_PENDING {
+            let reader = read_passkeys(&rp.layout)
+                .ok()
+                .and_then(|mut p| p.remove("cmVhZGVy"));
+            match reader {
+                Some(reader) => {
+                    rp.open_session(reader, 1_000).unwrap();
+                }
+                None => {
+                    session_as(&rp, "cmVhZGVy", "reader", Authority::Read, 1_000);
+                }
+            }
+        }
+        session_as(&rp, "b3duZXI", "owner", Authority::Write, 1_000);
+        let owner = read_passkeys(&rp.layout)
+            .unwrap()
+            .remove("b3duZXI")
+            .unwrap();
+        let opened = rp.open_session(owner, 1_010);
+        assert!(
+            opened.is_ok(),
+            "the owner cannot sign in: {}",
+            opened.err().unwrap_or_default()
+        );
+    }
+
+    /// Past [`MAX_SESSIONS_PER_PASSKEY`], a passkey's new sign-in ends that passkey's OLDEST
+    /// session, and only that one: its newer sessions and every other passkey's stay live.
+    #[test]
+    fn a_passkeys_sign_in_past_its_bound_ends_its_own_oldest_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let rp = Passkeys::new(Layout::in_config_home(dir.path()), 1060);
+        let other = session_as(&rp, "b3duZXI", "owner", Authority::Write, 999);
+        let first = session_as(&rp, "cmVhZGVy", "reader", Authority::Read, 1_000);
+        let reader = read_passkeys(&rp.layout)
+            .unwrap()
+            .remove("cmVhZGVy")
+            .unwrap();
+        let mut tokens = vec![first];
+        for n in 1..MAX_SESSIONS_PER_PASSKEY as u64 {
+            tokens.push(rp.open_session(reader.clone(), 1_000 + n).unwrap().0);
+        }
+        let now = 1_000 + MAX_SESSIONS_PER_PASSKEY as u64;
+        assert!(tokens.iter().all(|t| rp.identity(t, now).is_some()));
+        let (newest, _) = rp.open_session(reader, now).unwrap();
+        assert!(rp.identity(&tokens[0], now).is_none(), "the oldest ended");
+        assert!(tokens[1..].iter().all(|t| rp.identity(t, now).is_some()));
+        assert!(
+            rp.identity(&newest, now).is_some(),
+            "the new sign-in opened"
+        );
+        assert!(
+            rp.identity(&other, now).is_some(),
+            "another passkey's session"
+        );
+        let held = rp
+            .state
+            .lock()
+            .unwrap()
+            .sessions
+            .values()
+            .filter(|s| s.credential_id == "cmVhZGVy")
+            .count();
+        assert_eq!(held, MAX_SESSIONS_PER_PASSKEY);
     }
 
     /// A NEW relying party over the same state directory: what a restarted gonk builds.

@@ -5207,6 +5207,10 @@ impl Endpoint for PasskeyDoor {
         } else {
             self.passkeys.local_site().clone()
         };
+        // ★ Only `/auth/{op}` carries that key. A request that reached this resource any other
+        // way (`/iki/gonk/passkey/{op}`, a `/k` command) names the person and no session, and
+        // is answered as signed in as nobody ([`SignedIn::Principal`]), never from another
+        // session of the person.
         let door = match crate::doors::session_key(inv.capability) {
             Some(key) => SignedIn::Session { key, principal },
             None => SignedIn::Principal(principal),

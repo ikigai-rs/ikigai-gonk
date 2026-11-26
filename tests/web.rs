@@ -5609,3 +5609,138 @@ fn the_facet_json_face_carries_the_counts_the_html_shows() {
         406
     );
 }
+
+/// Cookies ignore the port, so a page on another localhost port (ledger #880) can set a
+/// second `gonk_session` cookie with a longer `Path` (`document.cookie = "gonk_session=<a
+/// token of its own>; Path=/l"`). The browser then sends it FIRST, ahead of the HttpOnly one
+/// gonk set, and gonk never sets a second. The request used to run as whichever session came
+/// first; with two `gonk_session` cookies it is now signed in as nobody.
+#[test]
+fn two_session_cookies_sign_the_request_in_as_nobody() {
+    let server = Server::start();
+    let scopes = grants_for("default", Authority::Write).unwrap();
+    let (mine, _) = sign_in(&server, "brian", &scopes);
+    let other = Authenticator::named("other");
+    let invite = identity::invite(
+        &server.layout,
+        "other",
+        &scopes,
+        false,
+        30,
+        identity::now_seconds(),
+    )
+    .unwrap();
+    let c = challenge(&server, "register-options");
+    let enrolled = server.json(
+        "/auth/register",
+        &other.register_body_labeled(&c, &invite, &server.origin(), "other"),
+    );
+    assert_eq!(enrolled.status, 200, "{enrolled:?}");
+    let c = challenge(&server, "login-options");
+    let login = server.json("/auth/login", &other.login_body(&c, &server.origin(), 1));
+    assert_eq!(login.status, 200, "{login:?}");
+    let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
+    let theirs = v["session"].as_str().unwrap().to_string();
+
+    let session = |cookie: String| {
+        server.raw(
+            "GET",
+            "/auth/session",
+            &[
+                ("Cookie", cookie),
+                ("Sec-Fetch-Site", "same-origin".to_string()),
+            ],
+            "",
+        )
+    };
+    let name = identity::SESSION_COOKIE;
+    let got = session(format!("{name}={theirs}; {name}={mine}"));
+    assert_eq!(got.status, 200, "{got:?}");
+    assert!(
+        !got.body.contains("\"other\""),
+        "the browser is signed in as the passkey another port's page chose: {}",
+        got.body
+    );
+    assert_eq!(got.body.trim(), "{}", "signed in as nobody: {}", got.body);
+    // Either order, and with an unrelated cookie between them.
+    let got = session(format!("{name}={mine}; theme=dark; {name}={theirs}"));
+    assert_eq!(got.body.trim(), "{}", "{}", got.body);
+    // One cookie still signs in, beside unrelated ones.
+    let got = session(format!("theme=dark; {name}={mine}"));
+    assert!(got.body.contains("\"writeSeconds\""), "{}", got.body);
+}
+
+/// The passkey resource answers only for the session the request's cookie names, whatever
+/// route reached it. Through `/auth/{op}` the door hands it that session's key (ledger #4363);
+/// a request that reaches it another way (`/iki/gonk/passkey/session`) carries only the
+/// person, and used to be answered from, and refresh, the person's NEWEST session: here the
+/// phone's, when the laptop asked. It is now answered as nobody.
+#[test]
+fn the_passkey_resource_never_answers_for_another_session_of_the_person() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    let server = Server::start();
+    let scopes = grants_for("default", Authority::Write).unwrap();
+    let laptop = Authenticator::named("laptop");
+    let phone = Authenticator::named("phone");
+    let invite = identity::invite(
+        &server.layout,
+        "brian",
+        &scopes,
+        false,
+        30,
+        identity::now_seconds(),
+    )
+    .unwrap();
+    let c = challenge(&server, "register-options");
+    let enrolled = server.json(
+        "/auth/register",
+        &laptop.register_body_labeled(&c, &invite, &server.origin(), "laptop"),
+    );
+    assert_eq!(enrolled.status, 200, "{enrolled:?}");
+    let person = identity::read_passkeys(&server.layout).unwrap()
+        [&URL_SAFE_NO_PAD.encode(&laptop.id)]
+        .person
+        .clone();
+    let (code, _, _) =
+        identity::invite_person(&server.layout, &person, 30, identity::now_seconds()).unwrap();
+    let c = challenge(&server, "register-options");
+    let enrolled = server.json(
+        "/auth/register",
+        &phone.register_body_labeled(&c, &code, &server.origin(), "phone"),
+    );
+    assert_eq!(enrolled.status, 200, "{enrolled:?}");
+    let login = |auth: &Authenticator| {
+        let c = challenge(&server, "login-options");
+        let login = server.json("/auth/login", &auth.login_body(&c, &server.origin(), 1));
+        assert_eq!(login.status, 200, "{login:?}");
+        let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
+        v["session"].as_str().unwrap().to_string()
+    };
+    let at_laptop = login(&laptop);
+    std::thread::sleep(Duration::from_millis(1100));
+    let _at_phone = login(&phone);
+
+    let get = |path: &str| {
+        server.raw(
+            "GET",
+            path,
+            &[
+                (
+                    "Cookie",
+                    format!("{}={at_laptop}", identity::SESSION_COOKIE),
+                ),
+                ("Sec-Fetch-Site", "same-origin".to_string()),
+            ],
+            "",
+        )
+    };
+    let own = get("/auth/session");
+    assert_eq!(own.status, 200, "{own:?}");
+    assert!(own.body.contains("\"laptop\""), "{}", own.body);
+    let other_route = get("/iki/gonk/passkey/session");
+    assert!(
+        !other_route.body.contains("\"phone\""),
+        "the laptop's request was answered for the phone's session: {other_route:?}"
+    );
+}
