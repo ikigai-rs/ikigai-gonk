@@ -28,6 +28,7 @@ fn door(bind: &str) -> doors::HttpDoor {
         passkeys: None,
         public: Vec::new(),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     }
 }
 

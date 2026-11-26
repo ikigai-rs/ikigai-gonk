@@ -322,6 +322,7 @@ impl Served {
             passkeys: None,
             public: Vec::new(),
             anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+            public_origin: None,
         };
         let edge = doors::edge_config(door.clone());
         let http = Arc::clone(&self.http);

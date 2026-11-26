@@ -1047,9 +1047,25 @@ fn serve(flags: &config::Flags) -> ! {
             .unwrap_or(settings.http.port());
         // Sign-ins and sign-outs are written whatever `gonk.log.access` says: they are rare,
         // and they are the audit of who held a session (ledger #1824).
+        // ★ The public listener (ledger #4367): bound before anything is served, so a port
+        // already taken refuses the start rather than serving half the configuration.
+        let public_listener = match &settings.public_http {
+            Some(public) => Some(
+                tokio::net::TcpListener::bind(public.bind)
+                    .await
+                    .unwrap_or_else(|e| {
+                        fail(&format!("cannot bind the public http {}: {e}", public.bind))
+                    }),
+            ),
+            None => None,
+        };
         let passkeys = Passkeys::new(layout.clone(), port)
             .with_idle_seconds(settings.session_idle_seconds)
             .with_max_seconds(settings.session_max_seconds);
+        let passkeys = match &settings.public_http {
+            Some(public) => passkeys.with_public_site(identity::Site::public(&public.origin)),
+            None => passkeys,
+        };
         let passkeys = Arc::new(match &record {
             Some(record) => passkeys.auditing(Arc::clone(record)),
             None => passkeys,
@@ -1133,6 +1149,17 @@ fn serve(flags: &config::Flags) -> ! {
         );
         if let Some(caveat) = doors::passkey_caveat(bound) {
             eprintln!("          ⚠ {caveat}");
+        }
+        if let Some(public) = &settings.public_http {
+            system.listening("HTTP public", public.bind.to_string());
+            eprintln!(
+                "  public  {}/ — loopback {} for a TLS proxy only (`tailscale serve`); no \
+                 anonymous grant, `Host` and `Origin` must be this origin, passkeys registered \
+                 at `{}` only, `Secure` session cookie",
+                public.origin,
+                public.bind,
+                identity::Site::public(&public.origin).rp_id
+            );
         }
         eprintln!("  browse  {browse_line}");
         eprintln!(
@@ -1221,6 +1248,7 @@ fn serve(flags: &config::Flags) -> ! {
             bind: bound,
             passkeys: Some(passkeys),
             anonymous_sparql_budget_ms: settings.anonymous_sparql_budget_ms,
+            public_origin: None,
         };
         // Edge refusals write their own access lines (ledger #894).
         let edge = doors::edge_config_with(door.clone(), access(access::Door::Http));
@@ -1236,14 +1264,49 @@ fn serve(flags: &config::Flags) -> ! {
         // A browser navigating to an error gets it in gonk's own page, with the passkey
         // sign-in on it when signing in would cure it (ledger #2021).
         let edge = ikigai_gonk::refusal::install(edge, door.clone(), Arc::clone(&face));
-        let error = ikigai_web::serve_with_listener(
+        // ★ The public listener's door (ledger #4367): the same resolver, passkeys and public
+        // files, told apart by the port it is bound to — no anonymous grant there at all.
+        let public = public_listener.zip(settings.public_http.clone()).map(|(listener, at)| {
+            let door = doors::HttpDoor {
+                anonymous: Vec::new(),
+                bind: listener.local_addr().unwrap_or(at.bind),
+                public_origin: Some(identity::Site::public(&at.origin)),
+                ..door.clone()
+            };
+            let edge = doors::edge_config_with(door.clone(), access(access::Door::Http));
+            let edge = match settings.toolbox {
+                Some(_) => ikigai_gonk::toolbox::route(edge),
+                None => edge,
+            };
+            let edge = if settings.faces.is_empty() {
+                edge
+            } else {
+                ikigai_gonk::face::route(edge)
+            };
+            let edge = ikigai_gonk::refusal::install(edge, door.clone(), Arc::clone(&face));
+            ikigai_web::serve_with_listener(
+                Arc::clone(&http),
+                doors::http_cap(door),
+                listener,
+                edge,
+            )
+        });
+        let local = ikigai_web::serve_with_listener(
             http,
             doors::http_cap(door),
             listener,
             edge,
-        )
-        .await;
-        fail(&format!("the http door stopped: {error:?}"))
+        );
+        match public {
+            None => {
+                let error = local.await;
+                fail(&format!("the http door stopped: {error:?}"))
+            }
+            Some(public) => tokio::select! {
+                error = local => fail(&format!("the http door stopped: {error:?}")),
+                error = public => fail(&format!("the public http door stopped: {error:?}")),
+            },
+        }
     })
 }
 

@@ -162,10 +162,80 @@ pub const RP_ID: &str = "localhost";
 pub const SESSION_COOKIE: &str = "gonk_session";
 
 /// The `Set-Cookie` value that opens a session: `HttpOnly`, `SameSite=Strict`, for the whole
-/// origin, for `seconds`. ⚠ No `Secure`: the HTTP door serves plain `http://localhost`; add it
-/// once the door is served over TLS.
+/// origin, for `seconds`. ⚠ No `Secure`: the local listener serves plain `http://localhost`;
+/// the public listener's cookie is [`Site::session_cookie`], which carries it.
 pub fn session_cookie(token: &str, seconds: u64) -> String {
     format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={seconds}")
+}
+
+/// The site a passkey ceremony runs at: one per HTTP listener (ledger #4367). The local
+/// listener's is `localhost` at `http://localhost:<port>`; the public listener's (behind a TLS
+/// proxy, `gonk.http.public_origin`) is the origin's full host at that `https://` origin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Site {
+    /// The WebAuthn relying-party id: `localhost`, or the public origin's whole host (never a
+    /// parent domain: `ts.net` is a public suffix).
+    pub rp_id: String,
+    /// The only origin a ceremony at this site is accepted from.
+    pub origin: String,
+    /// Whether the session cookie carries `Secure` (the public listener, served over TLS).
+    pub secure: bool,
+}
+
+impl Site {
+    /// The local listener's site: `localhost` at `http://localhost:{port}`, no `Secure`.
+    pub fn local(port: u16) -> Site {
+        Site {
+            rp_id: RP_ID.to_string(),
+            origin: format!("http://localhost:{port}"),
+            secure: false,
+        }
+    }
+
+    /// The public listener's site at `origin` (`https://<host>`, already validated by
+    /// [`crate::config`]): its host is the relying party, and its cookie carries `Secure`.
+    ///
+    /// ```
+    /// use ikigai_gonk::identity::Site;
+    /// let site = Site::public("https://box.tail1.ts.net");
+    /// assert_eq!(site.rp_id, "box.tail1.ts.net");
+    /// assert!(site.session_cookie("t", 5).contains("; Secure"));
+    /// ```
+    pub fn public(origin: &str) -> Site {
+        let origin = origin.trim().trim_end_matches('/').to_ascii_lowercase();
+        let host = origin
+            .strip_prefix("https://")
+            .unwrap_or(&origin)
+            .split(':')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        Site {
+            rp_id: host,
+            origin,
+            secure: true,
+        }
+    }
+
+    /// The `Set-Cookie` value that opens a session at this site ([`session_cookie`], plus
+    /// `Secure` at the public listener).
+    pub fn session_cookie(&self, token: &str, seconds: u64) -> String {
+        let cookie = session_cookie(token, seconds);
+        if self.secure {
+            format!("{cookie}; Secure")
+        } else {
+            cookie
+        }
+    }
+
+    /// The `Set-Cookie` value that ends the session at this site.
+    pub fn clear_session_cookie(&self) -> String {
+        if self.secure {
+            format!("{CLEAR_SESSION_COOKIE}; Secure")
+        } else {
+            CLEAR_SESSION_COOKIE.to_string()
+        }
+    }
 }
 
 /// The `Set-Cookie` value that ends the session in this browser.
@@ -1549,15 +1619,16 @@ fn refuse_person_invite(layout: &Layout, code: &str) -> Result<(), String> {
     }
 }
 
-/// Refuse a passkey registered at a relying party other than this server's [`RP_ID`] (ledger
-/// #4305): a passkey is bound to the site it was made for, and one made for another origin
-/// must not sign in here, whatever its signature says.
-fn refuse_other_rp(enrolled: &Enrolled) -> Result<(), String> {
-    if enrolled.rp_id != RP_ID {
+/// Refuse a passkey registered at a relying party other than the listener's own `site`
+/// (ledger #4305, #4367): a passkey is bound to the site it was made for, so the local listener
+/// takes only `localhost` passkeys and the public one only those registered at its host,
+/// whatever the signature says.
+fn refuse_other_rp(enrolled: &Enrolled, site: &Site) -> Result<(), String> {
+    if enrolled.rp_id != site.rp_id {
         return Err(format!(
-            "passkey `{}` was registered for the site `{}`, and this page is `{RP_ID}`: a \
+            "passkey `{}` was registered for the site `{}`, and this page is `{}`: a \
              passkey signs in only at the site it was registered for",
-            enrolled.label, enrolled.rp_id
+            enrolled.label, enrolled.rp_id, site.rp_id
         ));
     }
     Ok(())
@@ -1870,7 +1941,10 @@ struct Verified {
 /// The HTTP door's passkey relying party and session table.
 pub struct Passkeys {
     layout: Layout,
-    origin: String,
+    /// The local listener's site (`localhost`).
+    local: Site,
+    /// The public listener's site, when `gonk.http.public_origin` is set (ledger #4367).
+    public: Option<Site>,
     idle_seconds: u64,
     /// `gonk.http.session_max_hours`, in seconds: see [`Passkeys::lifetime`] and
     /// [`Passkeys::write_seconds`].
@@ -2001,7 +2075,8 @@ impl Passkeys {
         };
         let passkeys = Passkeys {
             layout,
-            origin: format!("http://localhost:{port}"),
+            local: Site::local(port),
+            public: None,
             idle_seconds: DEFAULT_IDLE_SECONDS,
             max_seconds: SESSION_SECONDS,
             audit: None,
@@ -2222,9 +2297,25 @@ impl Passkeys {
         invite_grant(&self.layout, invite)
     }
 
-    /// The only origin a ceremony is accepted from.
+    /// The only origin a ceremony at the LOCAL listener is accepted from.
     pub fn origin(&self) -> &str {
-        &self.origin
+        &self.local.origin
+    }
+
+    /// The local listener's site.
+    pub fn local_site(&self) -> &Site {
+        &self.local
+    }
+
+    /// The public listener's site, if one is configured.
+    pub fn public_site(&self) -> Option<&Site> {
+        self.public.as_ref()
+    }
+
+    /// This relying party, also serving the public listener at `site` (ledger #4367).
+    pub fn with_public_site(mut self, site: Site) -> Passkeys {
+        self.public = Some(site);
+        self
     }
 
     /// How many passkeys are enrolled (for the banner). An unreadable file counts as none
@@ -2330,6 +2421,12 @@ impl Passkeys {
     /// Finish a registration. The body is the page's JSON:
     /// `{challenge, invite, id, publicKey, clientDataJSON, label?}` (byte fields base64url).
     pub fn register(&self, body: &[u8], now: u64) -> Result<Enrolled, String> {
+        self.register_at(&self.local.clone(), body, now)
+    }
+
+    /// [`Passkeys::register`] at `site`, the listener the ceremony ran at: its origin is the
+    /// one accepted, and the passkey records its relying party (ledger #4367).
+    pub fn register_at(&self, site: &Site, body: &[u8], now: u64) -> Result<Enrolled, String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
         let text = |name: &str| {
             v.get(name)
@@ -2340,7 +2437,7 @@ impl Passkeys {
         let challenge = text("challenge")?;
         let expires = self.check_challenge(&challenge, Purpose::Register, now)?;
         let client_data = b64(&text("clientDataJSON")?, "clientDataJSON")?;
-        self.check_client_data(&client_data, "webauthn.create", &challenge)?;
+        self.check_client_data(site, &client_data, "webauthn.create", &challenge)?;
         let id = text("id")?;
         if let Some(why) = principal_refusal(&id) {
             return Err(why);
@@ -2387,7 +2484,7 @@ impl Passkeys {
         let entry = Enrolled {
             credential_id: id,
             person,
-            rp_id: RP_ID.to_string(),
+            rp_id: site.rp_id.clone(),
             grants,
             label,
             public_key: URL_SAFE_NO_PAD.encode(&key),
@@ -2403,7 +2500,17 @@ impl Passkeys {
     /// Writes one `gonk:Login` line either way: `outcome=ok` naming the passkey, or
     /// `outcome=denied` naming the credential the body claimed and no principal.
     pub fn login(&self, body: &[u8], now: u64) -> Result<(String, Identity), String> {
-        let answer = self.sign_in(body, now);
+        self.login_at(&self.local.clone(), body, now)
+    }
+
+    /// [`Passkeys::login`] at `site`: only a passkey registered at its relying party signs in.
+    pub fn login_at(
+        &self,
+        site: &Site,
+        body: &[u8],
+        now: u64,
+    ) -> Result<(String, Identity), String> {
+        let answer = self.sign_in(site, body, now);
         let claimed = serde_json::from_slice::<Value>(body)
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
@@ -2422,9 +2529,9 @@ impl Passkeys {
         answer
     }
 
-    fn sign_in(&self, body: &[u8], now: u64) -> Result<(String, Identity), String> {
+    fn sign_in(&self, site: &Site, body: &[u8], now: u64) -> Result<(String, Identity), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
-        let verified = self.verify_assertion(&v, Purpose::Login, now)?;
+        let verified = self.verify_assertion(site, &v, Purpose::Login, now)?;
         // Answered only now that a passkey signed it ([`MAX_PENDING`]).
         self.answer_challenge(&verified.challenge, verified.expires, now)?;
         // ★ Decided again under the lock, against the file as it is NOW: a `passkey revoke`
@@ -2449,7 +2556,13 @@ impl Passkeys {
     /// clientDataJSON, signature}`) against the enrolled key: the challenge sealed here for
     /// `purpose`, this origin and RP ID, user verification REQUIRED. Answers nothing and writes
     /// nothing: the caller marks the challenge answered once it acts on it.
-    fn verify_assertion(&self, v: &Value, purpose: Purpose, now: u64) -> Result<Verified, String> {
+    fn verify_assertion(
+        &self,
+        site: &Site,
+        v: &Value,
+        purpose: Purpose,
+        now: u64,
+    ) -> Result<Verified, String> {
         let text = |name: &str| {
             v.get(name)
                 .and_then(Value::as_str)
@@ -2462,7 +2575,7 @@ impl Passkeys {
         let enrolled = read_passkeys(&self.layout)?
             .remove(&id)
             .ok_or("this passkey is not enrolled on this server")?;
-        refuse_other_rp(&enrolled)?;
+        refuse_other_rp(&enrolled, site)?;
         let credential = RegisteredCredential::from_spki_der(
             b64(&id, "id")?,
             &b64(&enrolled.public_key, "public_key")?,
@@ -2483,8 +2596,8 @@ impl Passkeys {
                 signature: &signature,
             },
             &Policy {
-                rp_id: RP_ID,
-                origin: &self.origin,
+                rp_id: &site.rp_id,
+                origin: &site.origin,
                 challenge_b64url: &challenge,
                 require_user_verified: true,
             },
@@ -2616,7 +2729,18 @@ impl Passkeys {
         door: SignedIn<'_>,
         now: u64,
     ) -> Result<(String, Identity, String), String> {
-        let answer = self.widen(body, door, now);
+        self.add_grant_at(&self.local.clone(), body, door, now)
+    }
+
+    /// [`Passkeys::add_grant_as`] at `site`, the listener the assertion ran at.
+    pub fn add_grant_at(
+        &self,
+        site: &Site,
+        body: &[u8],
+        door: SignedIn<'_>,
+        now: u64,
+    ) -> Result<(String, Identity, String), String> {
+        let answer = self.widen(site, body, door, now);
         let claimed = serde_json::from_slice::<Value>(body)
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
@@ -2637,6 +2761,7 @@ impl Passkeys {
 
     fn widen(
         &self,
+        site: &Site,
         body: &[u8],
         door: SignedIn<'_>,
         now: u64,
@@ -2657,7 +2782,7 @@ impl Passkeys {
         let who = self.signed_in(signed_in, now).ok_or(
             "you are not signed in — sign in first, or create a new passkey with the invite",
         )?;
-        let verified = self.verify_assertion(&v, Purpose::AddGrant, now)?;
+        let verified = self.verify_assertion(site, &v, Purpose::AddGrant, now)?;
         // ★ The same PERSON (ledger #4305): a grant is added to the person, so any of its
         // passkeys may answer for it, whichever of them the session was opened with.
         if verified.enrolled.person != who.enrolled.person {
@@ -2835,7 +2960,18 @@ impl Passkeys {
         door: SignedIn<'_>,
         now: u64,
     ) -> Result<(String, Identity), String> {
-        let answer = self.reassert_session(body, door, now);
+        self.reassert_at(&self.local.clone(), body, door, now)
+    }
+
+    /// [`Passkeys::reassert`] at `site`, the listener the assertion ran at.
+    pub fn reassert_at(
+        &self,
+        site: &Site,
+        body: &[u8],
+        door: SignedIn<'_>,
+        now: u64,
+    ) -> Result<(String, Identity), String> {
+        let answer = self.reassert_session(site, body, door, now);
         let claimed = serde_json::from_slice::<Value>(body)
             .ok()
             .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_string));
@@ -2856,6 +2992,7 @@ impl Passkeys {
 
     fn reassert_session(
         &self,
+        site: &Site,
         body: &[u8],
         door: SignedIn<'_>,
         now: u64,
@@ -2866,7 +3003,7 @@ impl Passkeys {
         let who = self
             .identity_at(key.clone(), now)
             .ok_or("you are not signed in — sign in first")?;
-        let verified = self.verify_assertion(&v, Purpose::Reassert, now)?;
+        let verified = self.verify_assertion(site, &v, Purpose::Reassert, now)?;
         if verified.enrolled.credential_id != who.enrolled.credential_id {
             return Err(format!(
                 "the passkey that answered is not the one you are signed in with (`{}`)",
@@ -3192,19 +3329,26 @@ impl Passkeys {
         })
     }
 
-    fn check_client_data(&self, bytes: &[u8], kind: &str, challenge: &str) -> Result<(), String> {
+    fn check_client_data(
+        &self,
+        site: &Site,
+        bytes: &[u8],
+        kind: &str,
+        challenge: &str,
+    ) -> Result<(), String> {
         let v: Value =
             serde_json::from_slice(bytes).map_err(|_| "clientDataJSON is not JSON".to_string())?;
         let field = |name: &str| v.get(name).and_then(Value::as_str).unwrap_or_default();
         if field("type") != kind {
             return Err(format!("clientDataJSON is not a `{kind}` ceremony"));
         }
-        if field("origin") != self.origin {
+        if field("origin") != site.origin {
             return Err(format!(
-                "the ceremony ran at `{}`, and this server accepts only `{}` — open the page \
-                 through `localhost`, not an IP address",
+                "the ceremony ran at `{}`, and this page accepts only `{}` — open the page \
+                 through `localhost` (or the configured `gonk.http.public_origin`), not an IP \
+                 address",
                 field("origin"),
-                self.origin
+                site.origin
             ));
         }
         if field("challenge") != challenge {

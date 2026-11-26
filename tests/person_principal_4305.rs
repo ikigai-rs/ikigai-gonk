@@ -82,6 +82,7 @@ fn two_passkeys_of_one_person_are_stamped_as_that_person() {
         bind: "127.0.0.1:1062".parse().unwrap(),
         passkeys: Some(Arc::clone(&rp)),
         anonymous_sparql_budget_ms: ikigai_gonk::budget::DEFAULT_ANONYMOUS_SPARQL_BUDGET_MS,
+        public_origin: None,
     };
     let by_laptop = doors::http_principal_of(&door, &with_cookie(&sign_in(&rp, &laptop)), NOW);
     let by_phone = doors::http_principal_of(&door, &with_cookie(&sign_in(&rp, &phone)), NOW);

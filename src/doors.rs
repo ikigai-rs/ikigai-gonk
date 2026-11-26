@@ -659,6 +659,14 @@ pub struct HttpDoor {
     /// that carries no live passkey session with it, and the hub's front door stamps it
     /// ([`crate::budget`]).
     pub anonymous_sparql_budget_ms: u64,
+    /// The public origin this listener serves behind a TLS proxy (`gonk.http.public_origin`,
+    /// ledger [#4367](http://localhost:1062/l/default/item/4367)), or `None` for the local
+    /// listener. ★ Proxied traffic is told apart by the PORT it arrives on — this door is the
+    /// second loopback listener only the proxy points at — never by its `Host` header: every
+    /// peer behind a loopback proxy is loopback, so here nobody is anonymous-but-trusted. A
+    /// caller holds only what its signed-in person holds; `Host` must be the origin's host, a
+    /// write's `Origin` the origin, and a passkey signs in only if it was registered there.
+    pub public_origin: Option<identity::Site>,
 }
 
 /// The HTTP door's capability: a function of the REQUEST, not a constant.
@@ -783,17 +791,25 @@ fn http_identity(door: &HttpDoor, request: &HttpRequest, now: u64) -> Option<ide
 /// both were answered under the whole grant: SameSite ignores the port, so a page on another
 /// localhost port rode the signed-in session into `explain` and `review`.
 pub fn http_refusal(door: &HttpDoor, request: &HttpRequest) -> Option<&'static str> {
-    if !host_is_ours(request.header("host"), door.bind) {
+    let host_ok = match &door.public_origin {
+        Some(site) => host_is_public(request.header("host"), site),
+        None => host_is_ours(request.header("host"), door.bind),
+    };
+    if !host_ok {
         return Some(crate::admit::REFUSED_FOREIGN_HOST);
     }
     if carries_token_in_url(request) {
         return Some(crate::admit::REFUSED_TOKEN_IN_URL);
     }
     let read = matches!(request.method.as_str(), "GET" | "HEAD");
-    if !read && !same_origin(request, door.bind) {
+    let same = match &door.public_origin {
+        Some(site) => same_public_origin(request, site),
+        None => same_origin(request, door.bind),
+    };
+    if !read && !same {
         return Some(crate::admit::REFUSED_CROSS_SITE);
     }
-    if read && page_of(request, door.bind) == Page::ForeignLoad {
+    if read && door_page(door, request) == Page::ForeignLoad {
         return Some(crate::admit::REFUSED_FOREIGN_LOAD);
     }
     None
@@ -886,8 +902,20 @@ pub enum Page {
 /// assert_eq!(page_of(&from_own, door), Page::ForeignNavigation);
 /// ```
 pub fn page_of(request: &HttpRequest, bind: SocketAddr) -> Page {
+    page_with(request, |origin| is_our_origin(origin, bind))
+}
+
+/// [`page_of`] at `door`: its public origin is its only own origin when it has one.
+fn door_page(door: &HttpDoor, request: &HttpRequest) -> Page {
+    match &door.public_origin {
+        Some(site) => page_with(request, |origin| origin == site.origin),
+        None => page_of(request, door.bind),
+    }
+}
+
+fn page_with(request: &HttpRequest, is_ours: impl Fn(&str) -> bool) -> Page {
     let site = request.header("sec-fetch-site").map(str::trim);
-    let ours = |origin: &str| is_our_origin(origin.trim().trim_end_matches('/'), bind);
+    let ours = |origin: &str| is_ours(origin.trim().trim_end_matches('/'));
     let foreign = match site {
         Some(site) => !matches!(site, "same-origin" | "none"),
         // ⚠ Only without `Sec-Fetch-Site`: a `Referer` is the page a navigation LEFT, and a
@@ -1094,7 +1122,10 @@ fn http_scopes_for(
     if let Some(marker) = http_refusal(door, request) {
         return vec![marker.to_string()];
     }
-    let loopback = request.peer.is_some_and(is_loopback);
+    // ★ Ledger #4367: behind a loopback proxy every peer is loopback, so the public listener
+    // trusts no peer — a proxied request never passes as a local process.
+    let public_listener = door.public_origin.is_some();
+    let loopback = !public_listener && request.peer.is_some_and(is_loopback);
     let mut scopes: Vec<String> = if loopback {
         door.anonymous.clone()
     } else {
@@ -1125,7 +1156,7 @@ fn http_scopes_for(
     // ★ Ledger #880: another page's navigation carries the READ half, whatever it names — so
     // `<a href="/k?c=source urn:repo:R:explain:P">` on a page at another localhost port, which
     // rides the signed-in session, cannot spend inference or archive an answer.
-    if page_of(request, door.bind) == Page::ForeignNavigation {
+    if door_page(door, request) == Page::ForeignNavigation {
         scopes = crate::admit::foreign_page_scopes(&scopes);
     }
     // ★ Ledger #964/#979: a caller with no live passkey session is ANONYMOUS, and its SPARQL
@@ -1147,7 +1178,33 @@ fn http_scopes_for(
             scopes.push(session_marker(&identity::session_id(&token)));
         }
     }
+    // ★ Ledger #4367: the passkey resource runs its ceremony at the listener's own site, so a
+    // request to it through the public listener says so. A door marker: no caller can forge it.
+    if public_listener && is_auth_path(request) {
+        scopes.push(PUBLIC_SITE_MARKER.to_string());
+    }
     scopes
+}
+
+/// The marker the public listener adds to a request to the passkey resource (`/auth/…`):
+/// its ceremonies run at [`identity::Passkeys::public_site`] (ledger #4367). Under
+/// [`crate::admit::DOOR_PREFIX`], so no grant may name it.
+pub const PUBLIC_SITE_MARKER: &str = "urn:iki:gonk:door:site:public";
+
+/// Whether `capability` came through the public listener's passkey resource
+/// ([`PUBLIC_SITE_MARKER`]).
+///
+/// ```
+/// use ikigai_core::Capability;
+/// use ikigai_gonk::doors::{at_public_site, PUBLIC_SITE_MARKER};
+/// assert!(at_public_site(&Capability::scoped([PUBLIC_SITE_MARKER])));
+/// assert!(!at_public_site(&Capability::scoped(["urn:cap:ledger:read:default"])));
+/// assert!(!at_public_site(&Capability::root()));
+/// ```
+pub fn at_public_site(capability: &Capability) -> bool {
+    capability
+        .scopes()
+        .is_some_and(|scopes| scopes.iter().any(|s| s == PUBLIC_SITE_MARKER))
 }
 
 /// Every session marker starts here: under [`crate::admit::DOOR_PREFIX`], so no grant may name
@@ -1317,6 +1374,32 @@ fn host_is_ours(host: Option<&str>, bind: SocketAddr) -> bool {
     our_names(bind)
         .iter()
         .any(|name| host == *name || host == format!("{name}:{port}"))
+}
+
+/// `host` is exactly the public origin's host (and port, when the origin names one): the
+/// public listener answers to no other name, `localhost` included (ledger #4367).
+fn host_is_public(host: Option<&str>, site: &identity::Site) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let host = host.trim().to_ascii_lowercase();
+    site.origin.strip_prefix("https://") == Some(host.as_str())
+        || host == format!("{}:443", site.rp_id) && site.origin == format!("https://{}", site.rp_id)
+}
+
+/// A write at the public listener comes from its own origin: `Origin` equal to it (or the
+/// `null` of this server's own form, [`own_form_post`]), and never with no `Origin` at all.
+fn same_public_origin(request: &HttpRequest, site: &identity::Site) -> bool {
+    let fetch = request.header("sec-fetch-site").map(str::trim);
+    if fetch.is_some_and(|fetch| !matches!(fetch, "same-origin" | "none")) {
+        return false;
+    }
+    match request.header("origin") {
+        None => false,
+        Some(origin) => {
+            own_form_post(origin, fetch) || origin.trim().trim_end_matches('/') == site.origin
+        }
+    }
 }
 
 /// `origin` is `http://` one of this door's names with its port ([`our_names`]).
@@ -1796,6 +1879,7 @@ mod tests {
             bind,
             passkeys: None,
             anonymous_sparql_budget_ms: 1_000,
+            public_origin: None,
         };
         let admit = super::http_admit_with(door, Some(log));
         for method in ["GET", "HEAD", "POST", "DELETE"] {
