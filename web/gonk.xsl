@@ -3086,6 +3086,65 @@
     </div>
   </xsl:template>
 
+  <xsl:template match="view:sessions">
+    <section class="panel sessions" aria-labelledby="sessions-title">
+      <h2 id="sessions-title">Agent sessions</h2>
+      <xsl:choose>
+        <xsl:when test="@refused"><p class="note"><xsl:value-of select="@refused"/></p></xsl:when>
+        <xsl:otherwise>
+          <p class="note">
+            <xsl:value-of select="@count"/>
+            <xsl:text>, newest first, as each agent reported it when it handed the item back. A field the agent did not report reads “not reported”. Times are UTC.</xsl:text>
+          </p>
+          <div class="table-wrap" tabindex="0" role="region" aria-labelledby="sessions-table-title">
+            <table class="sessions-table">
+              <caption id="sessions-table-title">Agent sessions on this item, one row each, newest first</caption>
+              <thead>
+                <tr>
+                  <th scope="col">Session</th>
+                  <th scope="col">Recorded</th>
+                  <th scope="col">Machine</th>
+                  <th scope="col">Harness</th>
+                  <th scope="col">Model</th>
+                  <th scope="col">Exit status</th>
+                  <th scope="col">Wall-clock time</th>
+                  <th scope="col">Turns</th>
+                  <th scope="col">Input tokens</th>
+                  <th scope="col">Cached input tokens</th>
+                  <th scope="col">Cache creation tokens</th>
+                  <th scope="col">Output tokens</th>
+                </tr>
+              </thead>
+              <tbody>
+                <xsl:for-each select="view:session">
+                  <tr>
+                    <th scope="row"><code><xsl:value-of select="@id"/></code></th>
+                    <td>
+                      <xsl:choose>
+                        <xsl:when test="@datetime != ''"><time datetime="{@datetime}"><xsl:value-of select="@recorded"/></time></xsl:when>
+                        <xsl:otherwise><xsl:value-of select="@recorded"/></xsl:otherwise>
+                      </xsl:choose>
+                    </td>
+                    <td><xsl:value-of select="@machine"/></td>
+                    <td><xsl:value-of select="@harness"/></td>
+                    <td><xsl:value-of select="@model"/></td>
+                    <td class="num"><xsl:value-of select="@exit"/></td>
+                    <td class="num"><xsl:value-of select="@wall-clock"/></td>
+                    <td class="num"><xsl:value-of select="@turns"/></td>
+                    <td class="num"><xsl:value-of select="@input"/></td>
+                    <td class="num"><xsl:value-of select="@cached-input"/></td>
+                    <td class="num"><xsl:value-of select="@cache-creation"/></td>
+                    <td class="num"><xsl:value-of select="@output"/></td>
+                  </tr>
+                </xsl:for-each>
+              </tbody>
+            </table>
+          </div>
+        </xsl:otherwise>
+      </xsl:choose>
+    </section>
+  </xsl:template>
+
   <xsl:template name="item">
     <article id="item" class="item-page">
       <xsl:apply-templates select="view:flash"/>
@@ -3122,6 +3181,10 @@
           </ul>
         </section>
       </xsl:if>
+      <!-- Ledger #3024: the item's agent sessions, raw, as the ledger's item:{id}:sessions face
+           holds them (src/web.rs::item_sessions). Nothing totaled or priced; a field the
+           harness did not report reads "not reported", never 0. -->
+      <xsl:apply-templates select="view:sessions"/>
       <section class="panel comments" aria-labelledby="comments-title">
         <h2 id="comments-title">Comments</h2>
         <xsl:if test="count(rdf:RDF/ledger:Comment) = 0"><p class="empty">No comments yet.</p></xsl:if>

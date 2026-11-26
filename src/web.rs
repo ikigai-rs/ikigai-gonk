@@ -3767,6 +3767,136 @@ async fn enrich_git_links(graph: &mut Graph, inv: &Invocation<'_>) {
     }
 }
 
+/// What a session summary shows for a field its harness did not report (ledger #3024): never 0.
+const NOT_REPORTED: &str = "not reported";
+
+/// A whole number with a comma every three digits, as written; anything else as it came.
+fn grouped(raw: &str) -> String {
+    let (sign, digits) = raw.strip_prefix('-').map_or(("", raw), |d| ("-", d));
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return raw.to_string();
+    }
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    format!("{sign}{out}")
+}
+
+/// A wall-clock time in milliseconds, in words a screen reader reads as time: `30 min 30 s`,
+/// `1 h 0 min 5 s`, `850 ms`. Anything that is not a whole number is shown as it came.
+fn wall_clock(raw: &str) -> String {
+    let Ok(ms) = raw.parse::<u64>() else {
+        return raw.to_string();
+    };
+    if ms < 1000 {
+        return format!("{ms} ms");
+    }
+    let seconds = ms / 1000;
+    let (h, m, s) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    match (h, m) {
+        (0, 0) => format!("{s} s"),
+        (0, _) => format!("{m} min {s} s"),
+        _ => format!("{h} h {m} min {s} s"),
+    }
+}
+
+/// One item's agent sessions (ledger #3024): the ledger's own `item:{id}:sessions` face, read in
+/// JSON under the viewer's capability, as raw as the ledger holds them, newest first in the
+/// ledger's order. A session posted with no summary is not in that face, so it is not here; a
+/// field the harness did not report reads [`NOT_REPORTED`]. Nothing is totaled, priced or
+/// fetched from anywhere else. Empty when the item has no summary; a refusal is a sentence.
+async fn item_sessions(inv: &Invocation<'_>, ledger: &Ledger, id: &str) -> String {
+    let read = match request(Verb::Source, &format!("{}:sessions", ledger.item(id))) {
+        Ok(read) => with(read, "as", "application/json"),
+        Err(_) => return String::new(),
+    };
+    let document = match fetch(inv, read).await {
+        Ok(bytes) => serde_json::from_slice::<Value>(&bytes).ok(),
+        Err(Error::Denied(why)) => {
+            return element(
+                "sessions",
+                &[(
+                    "refused",
+                    &format!("The ledger did not show this item's agent sessions: {why}"),
+                )],
+                "",
+            );
+        }
+        Err(_) => None,
+    };
+    let Some(document) = document else {
+        return element(
+            "sessions",
+            &[(
+                "refused",
+                "The ledger did not answer this item's agent sessions.",
+            )],
+            "",
+        );
+    };
+    let sessions = document
+        .get("sessions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if sessions.is_empty() {
+        return String::new();
+    }
+    let field = |session: &Value, key: &str| -> Option<String> {
+        match session.get(key)? {
+            Value::Null => None,
+            Value::String(s) if s.is_empty() => None,
+            Value::String(s) => Some(s.clone()),
+            other => Some(other.to_string()),
+        }
+    };
+    let mut rows = String::new();
+    for session in &sessions {
+        let shown = |key: &str, shape: fn(&str) -> String| {
+            field(session, key).map_or_else(|| NOT_REPORTED.to_string(), |v| shape(&v))
+        };
+        let same = |v: &str| v.to_string();
+        let recorded = shown("recorded", |v| {
+            // `2026-11-26T19:26:22.123Z` → `2026-11-26 19:26`; the full instant is the datetime.
+            v.get(..16)
+                .map_or_else(|| v.to_string(), |d| d.replacen('T', " ", 1))
+        });
+        rows.push_str(&element(
+            "session",
+            &[
+                ("id", &shown("session", same)),
+                ("recorded", &recorded),
+                ("datetime", &field(session, "recorded").unwrap_or_default()),
+                ("machine", &shown("machineName", same)),
+                ("harness", &shown("harness", same)),
+                ("model", &shown("model", same)),
+                ("exit", &shown("exitStatus", same)),
+                ("wall-clock", &shown("wallClockMs", wall_clock)),
+                ("turns", &shown("turns", grouped)),
+                ("input", &shown("inputTokens", grouped)),
+                ("cached-input", &shown("cachedInputTokens", grouped)),
+                ("cache-creation", &shown("cacheCreationTokens", grouped)),
+                ("output", &shown("outputTokens", grouped)),
+            ],
+            "",
+        ));
+    }
+    let noun = if sessions.len() == 1 {
+        "session"
+    } else {
+        "sessions"
+    };
+    render::wrap(
+        "sessions",
+        &[("count", &format!("{} {noun}", sessions.len()))],
+        &rows,
+    )
+}
+
 async fn item_card(
     web: &Web,
     inv: &Invocation<'_>,
@@ -3848,6 +3978,7 @@ async fn item_card(
         children.push_str(&render::wrap("inbound", &[], &inbound.xml));
     }
     linked.slots.extend(inbound.slots);
+    children.push_str(&item_sessions(inv, ledger, id).await);
     let doc = envelope(
         "page",
         &[
@@ -5708,6 +5839,33 @@ impl Endpoint for DisplayRules {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ledger #3024: a session's counts are grouped and its wall-clock time is words; anything
+    /// that is not a whole number is shown exactly as the ledger holds it.
+    #[test]
+    fn a_session_count_is_grouped_and_its_wall_clock_is_words() {
+        for (raw, shown) in [
+            ("0", "0"),
+            ("999", "999"),
+            ("5120", "5,120"),
+            ("880000", "880,000"),
+            ("1234567", "1,234,567"),
+            ("-1000", "-1,000"),
+            ("12.5", "12.5"),
+            ("", ""),
+        ] {
+            assert_eq!(grouped(raw), shown, "{raw}");
+        }
+        for (raw, shown) in [
+            ("850", "850 ms"),
+            ("1000", "1 s"),
+            ("1830000", "30 min 30 s"),
+            ("3605000", "1 h 0 min 5 s"),
+            ("soon", "soon"),
+        ] {
+            assert_eq!(wall_clock(raw), shown, "{raw}");
+        }
+    }
 
     /// ★ Ledger #4305, sent back from review: a person IRI renders as the person's label only
     /// on a write a door stamped (it carries a committer). The same IRI as committer-less free
