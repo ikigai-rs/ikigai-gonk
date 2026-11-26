@@ -177,6 +177,13 @@ summary { cursor: pointer; color: var(--accent); }
 .agent-table th[scope="col"] { min-width: 5.5rem; }
 .agent-table th[scope="row"] { min-width: 9rem; overflow-wrap: anywhere; }
 .agent-table td { white-space: nowrap; }
+/* An item's agent sessions (ledger #3024): twelve columns, so at phone width the table scrolls
+   inside its own focusable `.table-wrap`, never the page. Numbers are in the text color, not muted. */
+.sessions .note + .table-wrap { margin-top: 0.5rem; }
+.sessions-table th[scope="col"] { white-space: normal; min-width: 5.5rem; }
+.sessions-table th[scope="row"] { overflow-wrap: anywhere; }
+.sessions-table td { white-space: nowrap; }
+.sessions-table td.num { color: inherit; text-align: right; }
 /* The totals row (ledger #3178): set off by a rule in the text color, so it holds in every theme and
    in forced colors, and by weight, never by color alone. */
 .agent-table tfoot th, .agent-table tfoot td { border-top: 2px solid currentColor; font-weight: 600; }
