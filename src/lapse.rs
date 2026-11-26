@@ -358,7 +358,7 @@ pub fn space(lapses: Lapses) -> EndpointSpace {
 /// The ledgers in `store`: each named graph `urn:iki:ledger:graph:{name}` that is a ledger's
 /// ([`crate::script::ledgers_in`]). Read from the store's graph list, so a ledger filed in since
 /// the last sweep is swept on the next.
-fn ledgers(store: &ikigai_store::Store) -> std::result::Result<Vec<String>, String> {
+pub(crate) fn ledgers(store: &ikigai_store::Store) -> std::result::Result<Vec<String>, String> {
     let mut graphs = String::new();
     for graph in store.named_graphs() {
         let graph = graph.map_err(|e| format!("the store's graphs could not be listed: {e}"))?;

@@ -186,8 +186,9 @@ pub fn run(
     })
 }
 
-/// Every old-form file `about` on a finding in `graph`, with its canonical IRI.
-fn plan(
+/// Every old-form file `about` on a finding in `graph`, with its canonical IRI: the read-only
+/// plan, which writes nothing ([`crate::upgrade`] reads it at startup).
+pub fn plan(
     issue: &dyn Fn(Request) -> Result<Vec<u8>, String>,
     graph: &str,
 ) -> Result<Vec<Rewrite>, String> {
