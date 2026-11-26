@@ -135,3 +135,68 @@ fn every_load_refuses_the_old_spelling_naming_the_new_one() {
         }
     }
 }
+
+/// ★ A start that fails AFTER the switch rewrote `grants.json` has already recorded the
+/// migration: the next start finds nothing to rewrite, so an entry not written by the failed one
+/// would never be written (ledger #3827, PR 441's review). The failure here is the startup check
+/// refusing another grant's broad store token, which runs after the rewrite; then that grant is
+/// removed, and a clean start writes no second set of lines.
+#[test]
+fn a_start_that_fails_after_the_rewrite_has_already_written_the_lines() {
+    let mut gonk = Gonk::with_quic("");
+    gonk.child.kill().unwrap();
+    gonk.child.wait().unwrap();
+
+    let write = grants_for("default", Authority::Write).unwrap();
+    let mut alpha = write.clone();
+    alpha.push("urn:cap:exec:git".to_string());
+    alpha.push("urn:cap:exec:gh".to_string());
+    let doc = serde_json::json!({
+        "alpha": alpha,
+        "beta": ["urn:cap:ledger:read:default", "urn:cap:exec:git"],
+        "broad": [ikigai_store::CAP_READ],
+    });
+    std::fs::write(gonk.layout.grants_json(), doc.to_string()).unwrap();
+
+    let refused = gonk
+        .try_restart()
+        .expect_err("the broad grant stops the start");
+    assert!(refused.contains("broad"), "{refused}");
+    let stored = quic::read_grants(&gonk.layout.grants_json()).unwrap();
+    assert_eq!(
+        stored["beta"],
+        ["urn:cap:ledger:read:default", CAP_EXEC_READ_GIT],
+        "the switch ran before the refusal"
+    );
+    let lines = respelled(&gonk);
+    assert_eq!(
+        lines.len(),
+        3,
+        "written before the start failed: {lines:#?}"
+    );
+    for (grant, from) in [
+        ("alpha", "urn:cap:exec:git"),
+        ("alpha", "urn:cap:exec:gh"),
+        ("beta", "urn:cap:exec:git"),
+    ] {
+        assert!(
+            lines.iter().any(|l| {
+                let columns: Vec<&str> = l.split(' ').collect();
+                columns.contains(&format!("grant={grant}").as_str())
+                    && columns.contains(&format!("from={from}").as_str())
+            }),
+            "no line for {grant} {from}: {lines:#?}"
+        );
+    }
+
+    let mut grants = stored;
+    grants.remove("broad");
+    std::fs::write(
+        gonk.layout.grants_json(),
+        serde_json::to_string(&grants).unwrap(),
+    )
+    .unwrap();
+    gonk.restart();
+    assert_eq!(respelled(&gonk), lines, "the clean start writes no line");
+    assert!(!gonk.log().contains("migrated"), "{}", gonk.log());
+}
