@@ -220,7 +220,7 @@ ikigai-vocab = "0.4.2"
 # 0.5.0: Per-graph freshness and `store-graph-written` (ledger #3375). `"0.5.0"` is `<0.6.0`.
 # ★ 0.6.0 (ledger #4069, the core 0.4.0 cascade): the first release on ikigai-core 0.4, so the graph
 # links ONE core. `"0.6.0"` is `<0.7.0`.
-ikigai-store = { version = "0.6.0", features = ["persistent"] }
+ikigai-store = { version = "0.6.2", features = ["persistent", "text-index"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -324,7 +324,7 @@ ikigai-store = { version = "0.6.0", features = ["persistent"] }
 # what gonk's callers get from this release. `"0.24.0"` is `<0.25.0`.
 # ★ 0.25.0 (ledger #4069, the core 0.4.0 cascade): the first release on ikigai-core 0.4, so the
 # graph links ONE core. `"0.25.0"` is `<0.26.0`.
-ikigai-ledger = "0.25.0"
+ikigai-ledger = "0.26.1"
 
 # The door line and its hash-chained segments (ledger #383): every request a door serves is one
 # `log:Access` entry, written by `ikigai_log::AccessLog` (ledger #3390) into a segment under

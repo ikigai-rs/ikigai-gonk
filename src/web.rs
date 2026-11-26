@@ -1862,6 +1862,9 @@ struct Listing<'a> {
     projects: Option<&'a str>,
     priority: Option<&'a str>,
     sort: Option<&'a str>,
+    /// `phrase=`: words that must appear in order, next to each other, in one field
+    /// (ikigai-ledger 0.26, ledger #4130).
+    phrase: Option<&'a str>,
 }
 
 /// URL and presentation state only. Matching stays in the ledger and `facet::pattern`.
@@ -1873,6 +1876,8 @@ struct LabelFilters<'a> {
     projects: Option<&'a str>,
     priority: Option<&'a str>,
     sort: Option<&'a str>,
+    /// Not a label filter either; kept like `sort` (ledger #4130).
+    phrase: Option<&'a str>,
 }
 
 enum LabelChange<'a> {
@@ -1893,6 +1898,7 @@ impl LabelFilters<'_> {
             ("projects", self.projects),
             ("priority", self.priority),
             ("sort", self.sort),
+            ("phrase", self.phrase),
         ] {
             if let Some(value) = value.filter(|v| !v.is_empty()) {
                 query.push_str(&format!("&{name}={}", ikigai_fn::html::url_segment(value)));
@@ -1950,6 +1956,7 @@ impl LabelFilters<'_> {
             projects: self.projects,
             priority: self.priority,
             sort: self.sort,
+            phrase: self.phrase,
         };
         let mut query = format!("?status={}", listing.status);
         if let Some(limit) = listing.limit {
@@ -2141,7 +2148,10 @@ async fn ledger_listing(
         projects,
         priority,
         sort,
+        phrase,
     } = *listing;
+    let phrase = phrase.filter(|p| !p.trim().is_empty());
+    let relevance = sort.is_some_and(|sort| sort.trim() == "relevance");
     // The page is still this ledger's (its header, its filing form), so it reads this
     // ledger even when `ledgers=` lists others; the union's own grants are the ledger's call.
     require_read(inv.capability, ledger)?;
@@ -2170,6 +2180,9 @@ async fn ledger_listing(
         );
         if let Some(text) = text {
             read = with(read, "text", text);
+        }
+        if let Some(phrase) = phrase {
+            read = with(read, "phrase", phrase);
         }
         for (name, value) in [
             ("labels", labels),
@@ -2219,14 +2232,26 @@ async fn ledger_listing(
         "offset",
         &offset.to_string(),
     );
+    // ★ "Most relevant first" is the ledger's to refuse (ledger #4130): with no search, or
+    // when a listed ledger's word index is missing or still rebuilding. The page then says so
+    // in the ledger's own sentence and lists nothing, never the same rows in another order
+    // under a heading that claims relevance.
+    let mut refused = None;
     let bytes = if empty_project {
         Vec::new()
     } else {
-        fetch(inv, rows_read.clone()).await?
+        match fetch(inv, rows_read.clone()).await {
+            Ok(bytes) => bytes,
+            Err(refusal) if relevance => {
+                refused = Some(relevance_refusal(&refusal));
+                Vec::new()
+            }
+            Err(e) => return Err(e),
+        }
     };
     let mut graph = Graph::from_turtle(&bytes).map_err(render_err)?;
     let (shown, mut order) = newest_rows(&mut graph, wanted);
-    if sort.is_some() && !empty_project {
+    if sort.is_some() && !empty_project && refused.is_none() {
         let ordered = fetch(inv, with(rows_read, "as", "application/json")).await?;
         let ordered: ikigai_ledger::json::ItemsDocument =
             serde_json::from_slice(&ordered).map_err(|e| render_err(e.to_string()))?;
@@ -2303,6 +2328,7 @@ async fn ledger_listing(
         projects,
         priority,
         sort,
+        phrase,
     };
     let page_url = ledger_href(ledger);
     let mut chunks: Vec<String> = Vec::new();
@@ -2334,6 +2360,11 @@ async fn ledger_listing(
         )
         .await?,
     );
+    let searching = text.is_some_and(|t| !t.trim().is_empty()) || phrase.is_some();
+    if searching && !relevance && !empty_project {
+        children
+            .push_str(&relevance_offer(inv, ledger, &selected, &filters, listing, &page_url).await);
+    }
     let page_url = ledger_href(ledger);
     let items_url = format!("{}/items", ledger_href(ledger));
     let query = count.more_query(status, text).map(|q| filters.append(q));
@@ -2381,6 +2412,7 @@ async fn ledger_listing(
             ("projects", projects.unwrap_or("")),
             ("priority", priority.unwrap_or("")),
             ("sort", sort.unwrap_or("")),
+            ("phrase", phrase.unwrap_or("")),
             ("limit", &wanted.to_string()),
             ("status-tail", &status_tail),
             ("page-url", &page_url),
@@ -2388,7 +2420,17 @@ async fn ledger_listing(
             ("facet-url", &facet_url),
             (
                 "count",
-                &if let Some(sort) = sort {
+                &if let Some(refusal) = &refused {
+                    format!(
+                        "{} {status} items match; none are listed. {refusal}",
+                        count.total
+                    )
+                } else if relevance {
+                    format!(
+                        "Showing {} of {} {status} items. Most relevant items first.",
+                        count.shown, count.total
+                    )
+                } else if let Some(sort) = sort {
                     format!(
                         "Showing {} of {} {status} items. Sort: {sort}.",
                         count.shown, count.total
@@ -2439,8 +2481,12 @@ async fn ledger_listing(
             // A number search this ledger holds no item for (ledger #4051), in #status and
             // said once on load by web/gonk.js (a live region does not speak what it was
             // parsed with).
-            ("page-status", said.unwrap_or("")),
-            ("page-status-announce", flag(said.is_some())),
+            ("page-status", said.or(refused.as_deref()).unwrap_or("")),
+            (
+                "page-status-announce",
+                flag(said.is_some() || refused.is_some()),
+            ),
+            ("refused", refused.as_deref().unwrap_or("")),
         ],
         &children,
     );
@@ -2641,6 +2687,104 @@ fn ledger_count_document(json: &[u8]) -> Result<ikigai_ledger::json::CountDocume
 /// which of those the viewer asked for were left out because this grant cannot read them.
 /// `asked` is the viewer's own `ledgers=`, already accepted by the ledger; `read` is the
 /// ledger's answer. The page decides nothing from this; it only says it.
+/// The sentence a page shows when the ledger refused `sort=relevance` (ledger #4130): the
+/// ledger's own words, which name the ledger and say that nothing was listed.
+fn relevance_refusal(refusal: &Error) -> String {
+    let said = match refusal {
+        Error::Unavailable(said) => said.clone(),
+        Error::InvalidArgument { detail, .. } => detail.clone(),
+        other => other.to_string(),
+    };
+    let said = said.trim().trim_end_matches('.');
+    format!("Most relevant ordering is not available: {said}.")
+}
+
+/// Whether the store's word index of `ledger`'s own graph answers now: its status resource
+/// (`urn:iki:store:text-index:graph:{graph}`, read under the viewer's own grant) says
+/// `state: ready`. Missing, stale, building, not enrolled or unreadable are all "no".
+async fn index_ready(inv: &Invocation<'_>, ledger: &Ledger) -> bool {
+    let thread = ikigai_store::graph_thread(&ledger.graph());
+    let Some(encoded) = thread.strip_prefix("urn:iki:store:graph-written:") else {
+        return false;
+    };
+    let Ok(iri) = Iri::parse(format!("urn:iki:store:text-index:graph:{encoded}")) else {
+        return false;
+    };
+    match inv.source(&iri).await {
+        Ok(status) => String::from_utf8_lossy(&status.bytes)
+            .lines()
+            .any(|line| line.trim() == "state: ready"),
+        Err(_) => false,
+    }
+}
+
+/// Under a search, the page offers "most relevant first" when every listed ledger's index
+/// answers, and says plainly which ones cannot (ledger #4130). Never offered without a search:
+/// the ledger refuses relevance then.
+async fn relevance_offer(
+    inv: &Invocation<'_>,
+    ledger: &Ledger,
+    selected: &Option<Vec<String>>,
+    filters: &LabelFilters<'_>,
+    listing: &Listing<'_>,
+    page_url: &str,
+) -> String {
+    let names: Vec<String> = match selected {
+        Some(names) => names.clone(),
+        None => vec![ledger.name().to_string()],
+    };
+    let mut not_ready = Vec::new();
+    for name in &names {
+        let ready = match Ledger::parse(name) {
+            Ok(listed) => index_ready(inv, &listed).await,
+            Err(_) => false,
+        };
+        if !ready {
+            not_ready.push(name.as_str());
+        }
+    }
+    if names.is_empty() {
+        return String::new();
+    }
+    if !not_ready.is_empty() {
+        let which = if not_ready.len() == 1 {
+            format!("ledger {}", not_ready[0])
+        } else {
+            format!("ledgers {}", not_ready.join(", "))
+        };
+        return element(
+            "relevance-off",
+            &[],
+            &format!(
+                "Most relevant ordering is not available: the search index for {which} is not \
+                 ready. It may still be rebuilding, or this server runs without one. The \
+                 results below are in the Sort field's order (by default, most recently \
+                 modified first)."
+            ),
+        );
+    }
+    let ranked = LabelFilters {
+        labels: filters.labels,
+        without: filters.without,
+        ledgers: filters.ledgers,
+        projects: filters.projects,
+        priority: filters.priority,
+        sort: Some("relevance"),
+        phrase: filters.phrase,
+    };
+    element(
+        "relevance",
+        &[
+            ("href", &ranked.url(listing, page_url, LabelChange::Keep)),
+            (
+                "items-url",
+                &ranked.url(listing, &format!("{page_url}/items"), LabelChange::Keep),
+            ),
+        ],
+        "Show the most relevant items first",
+    )
+}
+
 fn union_note(asked: &str, read: &[String]) -> String {
     let mut left_out: Vec<&str> = Vec::new();
     for name in asked.split(',').map(str::trim).filter(|n| !n.is_empty()) {
@@ -2718,6 +2862,7 @@ impl Endpoint for LedgerView {
         let projects = optional_nonblank(inv, "projects")?;
         let priority = optional_nonblank(inv, "priority")?;
         let sort = optional_nonblank(inv, "sort")?;
+        let phrase = optional_nonblank(inv, "phrase")?;
         let mut readable = None;
         let ledger = match self.shape {
             Shape::Home => match readable
@@ -2784,6 +2929,7 @@ impl Endpoint for LedgerView {
                 projects: projects.as_deref(),
                 priority: priority.as_deref(),
                 sort: sort.as_deref(),
+                phrase: phrase.as_deref(),
             },
             self.shape != Shape::Fragment,
             None,
@@ -2850,8 +2996,9 @@ impl Endpoint for LedgerView {
             .optional(),
         )
         .input(arg("priority", "Comma-separated 0, 1, 2, 3, 4 or none; any may match.").optional())
-        .input(arg("sort", "Comma-separated priority, created, modified, number or landing; prefix - for descending.").optional())
+        .input(arg("sort", "Comma-separated priority, created, modified, number or landing; prefix - for descending. Or relevance by itself, with text or phrase, for the most relevant items first.").optional())
         .input(arg("text", "A case-insensitive substring of the title.").optional())
+        .input(arg("phrase", "Words that must appear in the title in this order, next to each other, ignoring case.").optional())
         .input(arg("labels", "Comma-separated labels: every label must match.").optional())
         .input(arg("without", "Comma-separated labels: none may match.").optional())
         .input(
@@ -3882,6 +4029,7 @@ impl Endpoint for Act {
         let list_projects = take("_projects");
         let list_priority = take("_priority");
         let list_sort = take("_sort");
+        let list_phrase = take("_phrase");
         // A union page's row names its OWN ledger in `_ledger`, the action's target; the page
         // it re-renders is the listing's (ledger #3216).
         let list_ledger = take("_listLedger")
@@ -3994,6 +4142,7 @@ impl Endpoint for Act {
                     projects: list_projects.as_deref(),
                     priority: list_priority.as_deref(),
                     sort: list_sort.as_deref(),
+                    phrase: list_phrase.as_deref(),
                 };
                 let page = list_ledger.as_ref().unwrap_or(&ledger);
                 ledger_listing(&self.web, inv, page, &listing, false, flash, None, None).await
@@ -5638,6 +5787,7 @@ mod tests {
             projects: None,
             priority: None,
             sort: None,
+            phrase: None,
         };
         let listing = Listing {
             status: "all",
@@ -5650,6 +5800,7 @@ mod tests {
             projects: None,
             priority: None,
             sort: None,
+            phrase: None,
         };
         assert_eq!(
             filters.url(&listing, "/l/default", LabelChange::RemoveRequired("same")),
@@ -5675,6 +5826,7 @@ mod tests {
             projects: None,
             priority: None,
             sort: None,
+            phrase: None,
         };
         let query = filters.append(count.next_query("closed", Some("queue & review")).unwrap());
         assert_eq!(query, format!("?status=closed&limit={0}&offset={0}&text=queue%20%26%20review&labels=book%3Aikigai%2Cc%2B%2B%20%26%20caf%C3%A9&without=blocked%2Cdecide", rows::MAX_ROWS));
@@ -5695,6 +5847,7 @@ mod tests {
             projects: None,
             priority: None,
             sort: None,
+            phrase: None,
         };
         let query = filters.append(count.next_query("open", None).unwrap());
         assert_eq!(
@@ -5715,6 +5868,7 @@ mod tests {
             projects: filters.projects,
             priority: None,
             sort: None,
+            phrase: None,
         };
         for change in [
             LabelChange::Clear,

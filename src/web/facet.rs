@@ -104,7 +104,7 @@ pub(super) struct Facet {
 fn pattern(listing: &Listing<'_>) -> Result<String> {
     // ★ Only the title a text filter reads is bound (ledger #4140); the item must still have
     // a number, a title and a status, as a listed one does, so those stay as `[]`.
-    let title = if listing.text.is_some() {
+    let title = if listing.text.is_some() || listing.phrase.is_some() {
         "?title"
     } else {
         "[]"
@@ -168,7 +168,26 @@ fn pattern(listing: &Listing<'_>) -> Result<String> {
             literal(text)
         ));
     }
+    if let Some(phrase) = listing.phrase {
+        body.push_str(&format!(
+            "FILTER(REGEX(STR(?title), {}, \"i\"))\n",
+            literal(&phrase_pattern(phrase))
+        ));
+    }
     Ok(body)
+}
+
+/// ikigai-ledger 0.26's `phrase=` test, the same regular expression its `model` builds: the
+/// phrase's words (runs of letters and numbers, so nothing in them needs escaping), in order,
+/// separated by anything else, and bounded by a non-word or the text's ends (ledger #4130).
+fn phrase_pattern(phrase: &str) -> String {
+    let separator = r"[^\p{Alphabetic}\p{Number}]";
+    let words = phrase
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(&format!("{separator}+"));
+    format!("(?:^|{separator})({words})(?:{separator}|$)")
 }
 
 /// The ledgers whose graphs the counts read: the page's own, or under `ledgers=` the ones
@@ -299,6 +318,7 @@ impl Endpoint for Facet {
         let projects = optional_nonblank(inv, "projects")?;
         let priority = optional_nonblank(inv, "priority")?;
         let sort = optional_nonblank(inv, "sort")?;
+        let phrase = optional_nonblank(inv, "phrase")?;
         let listing = Listing {
             status: &status,
             text: text.as_deref(),
@@ -310,6 +330,7 @@ impl Endpoint for Facet {
             projects: projects.as_deref(),
             priority: priority.as_deref(),
             sort: sort.as_deref(),
+            phrase: phrase.as_deref(),
         };
         // ★ Two plain groupings (ledger #4140): an item's labels, and its priorities with
         // `unset` for none. COUNT(DISTINCT) keeps a second value of an item's title, number
@@ -369,6 +390,7 @@ impl Endpoint for Facet {
             projects: listing.projects,
             priority: listing.priority,
             sort: listing.sort,
+            phrase: listing.phrase,
         };
         let page = ledger_href(&ledger);
         // Two lists under their own headings, so a row starts with its term and count and
@@ -493,6 +515,7 @@ impl Endpoint for Facet {
             .input(arg("priority", "Comma-separated 0, 1, 2, 3, 4 or none.").optional())
             .input(arg("sort", "Preserve the listing sort in filter links.").optional())
             .input(arg("text", "Case-insensitive title substring.").optional())
+            .input(arg("phrase", "Title words in this order, next to each other, ignoring case.").optional())
             .input(arg("projects", "Comma-separated project names, resolved as on the list.").optional())
             .input(arg("ledgers", "Comma-separated ledger names: count over the ledger's own union of them, as the list does.").optional())
             .input(arg("limit", "Preserve this list page size in filter links; counts are unbounded.").optional())

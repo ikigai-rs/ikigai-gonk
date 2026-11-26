@@ -414,6 +414,23 @@ fn serve(flags: &config::Flags) -> ! {
         Some(quads) => store.with_max_scoped_copy_quads(quads),
         None => store,
     };
+    // The ledgers' word index (ledger #4130), enrolled before any space is composed: each
+    // ledger's own graph, titles and bodies, never a graveyard or a session graph
+    // (`ikigai_gonk::text_index`). Off by `gonk.store.text_index = false`.
+    let store = if settings.text_index {
+        store
+            .with_text_index(ikigai_gonk::text_index::enrollment())
+            .unwrap_or_else(|e| {
+                fail(&format!(
+                    "cannot open the ledgers' word index under {}: {e}\n  It is derived: move \
+                     that directory aside and start again to rebuild it, or set {} = false",
+                    ikigai_gonk::text_index::dir(&store_path).display(),
+                    ikigai_gonk::config::TEXT_INDEX_KEY
+                ))
+            })
+    } else {
+        store
+    };
     let explains = settings.explains();
     // ★★ Obligation 1, checked before a single door opens. The choice above confines browse's
     // reads to one graph; quads it wrote into another are still on disk and no longer visible
@@ -1146,6 +1163,10 @@ fn serve(flags: &config::Flags) -> ! {
             store_path.display()
         );
         eprintln!("  instance {instance} — new at every start; open pages compare it");
+        eprintln!(
+            "{}",
+            ikigai_gonk::text_index::banner_line(settings.text_index, &store_path)
+        );
         // ★ The URL that REACHES this bind (`doors::http_url`): `localhost` for 127.0.0.1,
         // because WebAuthn refuses an IP address as a relying party and a page opened at
         // 127.0.0.1 cannot use a passkey at all; the bound IP for any other loopback address,

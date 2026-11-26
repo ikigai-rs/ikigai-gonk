@@ -5152,6 +5152,7 @@ gonk.backup.every = "24h"
 # gonk.queue.serious = "critical,major" # the severities the Queue page asks a human about
 # gonk.review.judge = "urn:llm:coder-next:ask"  # the judge; the Queue orders by its verdict
 # gonk.log.access = false             # no door lines in the log segment (ON by default)
+# gonk.store.text_index = false       # no word index for ledger search (ON by default; see below)
 # gonk.http.anonymous_sparql_budget_ms = 1000  # an anonymous caller's SPARQL time budget, 1..5000
 # gonk.http.session_max_hours = 12   # a passkey session ends this long after its sign-in, 1..720;
                                       # its write lapses after 12 h whatever this says, reads go on
@@ -5532,6 +5533,65 @@ exactly the host that had something to lose, and it would have lost it twice —
 writer's quads relocated, and this server's coverage promise false from that moment on.
 `a_browse_read_touches_no_reserved_graph` states it; built against 0.3.2 it fails on the
 visibility half and, with that assertion removed, again on the write-back half.
+
+### The ledgers' word index, and what it costs
+
+gonk builds `ikigai-store` with its `text-index` feature and enrolls **each ledger's own graph**
+(`urn:iki:ledger:graph:{name}`), and in it only `dcterms:title` (weighted 2x) and `ledger:body`
+(item bodies and comments). A ledger's graveyard (`…:deleted`) and its session summaries
+(`…:session`, which have their own grant) are never enrolled, so a search can never reach them
+through the index ([`src/text_index.rs`](src/text_index.rs)). The index is a tantivy index per
+graph in `<store>/text-index`, and a search through it is gated by the same per-graph read
+grant as every other ledger read.
+
+It is on by default. `gonk.store.text_index = false` turns it off; any other value, or the line
+given twice, stops the start with the line to fix. With it off, every search still answers the
+same rows by scanning, and only "most relevant first" is refused.
+
+What it changes for a person:
+
+- On a ledger page, a search (the title field or **Exact phrase in the title**, `phrase=`)
+  offers **Show the most relevant items first** (`sort=relevance`) when every listed ledger's
+  index is ready. When one is not, the page says so in a sentence instead, and the results keep
+  the Sort field's order. With the order in effect, the count line says "Most relevant items
+  first."
+- `sort=relevance` with no search, or while an index is missing or rebuilding, lists nothing
+  and says why in the ledger's own words; it never shows the same rows in another order.
+
+**How big it is, and why it rebuilds itself.** The start banner prints the line
+`search  word index of every ledger's titles, bodies and comments at <store>/text-index — N MiB
+on disk now`. The index is **derived**: it holds no text (excerpts still come from the store),
+it is never backed up, and losing it costs a rebuild, never data. The store commits it without
+`fsync` and writes a clean-close marker when it shuts down with nothing pending, so **after an
+unclean shutdown (a crash, `kill -9`, power loss) it rebuilds each ledger's index in the
+background on the next start**. Searches scan until that rebuild is done, so they return the
+same rows, and only "most relevant first" waits. The same happens when the index is missing or
+its format or enrollment changed. A restored store directory brings its index with it, or
+starts without one and rebuilds.
+
+Measured on a scratch store with a generated 10,000-item ledger
+(`cargo run --release --example text-index-cost`, never the live gonk):
+
+| search (`urn:iki:ledger:default:items`, page of ~50) | before: no index | after: index |
+|---|---|---|
+| `text=staff` (titles; 627 items) | 317 ms | 316 ms |
+| `text=healthiness` (titles; 5 items) | 259 ms | 261 ms |
+| `search=healthiness whole_word=true match=title,body` (169) | 996 ms | 744 ms |
+| `phrase="lease parser"` (titles; 3) | 911 ms | 722 ms |
+| `phrase="lease parser" match=title,body` (212) | 999 ms | 999 ms |
+| `text=staff sort=relevance` | refused | 503 ms cold, 8.7 ms warm |
+| `search=healthiness whole_word=true match=title,body sort=relevance` | refused | 214 ms cold, 24 ms warm |
+
+Medians of 7 runs, each with a different `limit`, so the listing itself is never a cache hit.
+The "cold" figure is the first run. A ranked listing's later runs reuse the cached index query
+and candidate check, so its median is a warm figure. Seeding 10,000 items (13.5 MiB of title and
+body text) gave **20,002 index documents, 7.6 MiB on disk**, and the first build, from open to
+`state: ready`, took **1.8 s**. That is the cost of the rebuild after an unclean shutdown on a
+ledger this size. Substring searches (`text=`, `search=` without `whole_word`) still scan, as
+the ledger's design says, so they cost the same. Whole-word and phrase searches use the index to
+narrow the candidates the ledger checks. Ranking is new: without the index it is refused.
+These are in-process timings on a shared Linux machine, release build, RocksDB in a temporary
+directory, and not the end-to-end latency of a page.
 
 ### Giving browse its own graph — and upgrading a store that predates it
 
