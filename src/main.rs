@@ -776,20 +776,29 @@ fn serve(flags: &config::Flags) -> ! {
         layer::start(&settings.layers, &layer_mounts, &hub).unwrap_or_else(|e| fail(&e));
     // ★ The Layers page (ledger #1675): its own door under its own identity, mounted into
     // nothing, and dialled by nothing until a page is first opened.
+    // ★ A person adopts the unread cursors and feed subscriptions its passkeys kept before
+    // people (ledger #4436), as it adopts their dispatcher cursors.
+    let layers_former: ikigai_gonk::layers_view::Former = {
+        let layout = layout.clone();
+        Arc::new(move |principal: &str| identity::former_principals(&layout, principal))
+    };
     let layers_view = settings.layers_view.as_ref().map(|view| {
-        ikigai_gonk::layers_view::LayersView::connect(
+        let view = ikigai_gonk::layers_view::LayersView::connect(
             view,
             Some(homes.data.join("layers-view").join("cursors.json")),
-        )
+        );
+        view.adopt_former(Arc::clone(&layers_former));
+        view
     });
     // ★ The public feeds (ledger #3291): nothing is fetched or dialed until the owner joins.
-    let public_feeds = ikigai_gonk::feeds_join::PublicFeeds::open(
+    let public_feeds = ikigai_gonk::feeds_join::PublicFeeds::open_with_former(
         settings.feeds_door.clone(),
         &homes.data,
         Arc::new(ikigai_gonk::feeds_join::WebPki),
         layers_view.clone(),
         Some(homes.data.join("layers-view").join("cursors.json")),
         ikigai_gonk::layers_view::Waits::default(),
+        Some(layers_former),
     );
     // ★ The inquiry client (ledger #3695): the Layers page's door and identity, on a door of its
     // own, in a kernel mounted into nothing, and dialled by nothing until a view is first opened.

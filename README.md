@@ -283,7 +283,12 @@ the passkey was created with until it is re-created.
   whose `ledger:claimPrincipal` is an enrolled passkey's IRI to that passkey's person, so the
   person renews, releases and closes it (one stderr line says how many moved; release and
   takeover events keep the principal they recorded), and a person with no dispatcher cursor
-  of its own reads on from the one its passkey acknowledged. **Signing out from a page ends
+  of its own reads on from the one its passkey acknowledged. The Layers page's unread cursors
+  and feed subscriptions (`layers-view/cursors.json`, `layers-view/subscription.json` in the
+  data home, ledger #4436) follow the person in the same way: a person takes the larger cursor
+  per layer and the union of the subscriptions of every passkey that names it (a feed it
+  already has keeps its own filter), written under the person at the next save, and the
+  passkeys' entries stay for a downgrade. **Signing out from a page ends
   every device's session of the person**, not just this browser's (the button says "Sign out
   on all devices"); a sign-out that cannot read the person's passkeys ends nothing and says
   so, rather than answering as signed out. The page's `session` answer, its idle clock, the
