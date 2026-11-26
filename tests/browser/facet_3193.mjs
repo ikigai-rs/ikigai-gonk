@@ -72,7 +72,13 @@ try {
               assert.ok((await fallback.getAttribute("href")).includes("page=true"));
             }
           }
-          assert.equal(await page.locator("#search-priority").count(), 0);
+          // Saved filters (PR 381) gave the search form its own Priority field on purpose; the
+          // facet adds no priority control beside it, and no second field.
+          const priority = page.locator("#search-priority");
+          assert.ok(await priority.count() <= 1, "one Priority search field at most");
+          if (await priority.count()) {
+            assert.equal(await page.locator('label[for="search-priority"]').textContent(), "Priority (any may match)");
+          }
           assert.equal(await page.locator(".facet-terms a").filter({ hasText: "Priority" }).count(), 0);
           assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${file}: no page overflow`);
           if (javaScriptEnabled) {

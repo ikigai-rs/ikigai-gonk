@@ -93,9 +93,9 @@ async function open({ signal, hash = "", grant = "owner-viewer", label = "laptop
       case "/gonk.js":
         return route.fulfill({ contentType: "text/javascript; charset=utf-8", body: gonk }); // as gonk serves it
       case "/auth/session":
-        return token === "tok"
-          ? json(200, { label, grant, scopes: [], seconds: 60 })
-          : route.fulfill({ status: 401, body: "no session" });
+        // The page asks with the READ, which answers a signed-out caller `200 {}` (ledger #4443).
+        assert.equal(req.method(), "GET", "the page asks for its session with a GET");
+        return json(200, token === "tok" ? { label, grant, scopes: [], seconds: 60 } : {});
       case "/auth/register-options":
         return json(200, { challenge: "Y2hhbGxlbmdl", rpId: "localhost", grant });
       case "/auth/register":

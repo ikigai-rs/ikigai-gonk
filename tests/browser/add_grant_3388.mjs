@@ -100,7 +100,9 @@ async function open({ signedIn, refuse = false }) {
       case "/gonk.js":
         return route.fulfill({ contentType: "text/javascript", body: gonk });
       case "/auth/session":
-        return sessions.has(token) ? json(200, sessions.get(token)) : route.fulfill({ status: 404, body: "no session" });
+        // The page asks with the READ, which answers a signed-out caller `200 {}` (ledger #4443).
+        assert.equal(req.method(), "GET", "the page asks for its session with a GET");
+        return json(200, sessions.has(token) ? sessions.get(token) : {});
       case "/auth/logout":
         sessions.delete(token);
         return json(200, {}, { "Set-Cookie": CLEAR });

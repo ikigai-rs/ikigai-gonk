@@ -162,8 +162,9 @@ try {
     "Enter in the line field does not submit the annotation",
   );
 
-  // The same from the button, by Space, over a quote the hook filled.
-  await page.keyboard.press("Control+A");
+  // The same from the button, by Space, over a quote the hook filled. Select-all is
+  // ControlOrMeta+A: on macOS, Control+A only moves the caret to the start of the field.
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.type("5");
   await page.keyboard.press("Tab");
   assert.equal(await focused(), GO);
@@ -179,7 +180,7 @@ try {
     ["999", /This file has 80 lines/],
     ["abc", /line number/],
   ]) {
-    await page.keyboard.press("Control+A");
+    await page.keyboard.press("ControlOrMeta+A");
     await page.keyboard.type(wanted);
     await page.keyboard.press("Enter");
     assert.match(await status(), sentence);
@@ -196,7 +197,7 @@ try {
     LINE,
   );
   await tabTo("exact");
-  await page.keyboard.press("Control+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.press("Delete");
   await page.keyboard.press("Shift+Tab");
   assert.equal(await focused(), GO);
@@ -206,12 +207,12 @@ try {
 
   // A quote the person typed is never overwritten, and the field says why nothing moved.
   await page.keyboard.press("Tab");
-  await page.keyboard.press("Control+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.type("my own words");
   await page.keyboard.press("Shift+Tab");
   await page.keyboard.press("Shift+Tab");
   assert.equal(await focused(), LINE);
-  await page.keyboard.press("Control+A");
+  await page.keyboard.press("ControlOrMeta+A");
   await page.keyboard.type("9");
   await page.keyboard.press("Enter");
   assert.equal(await field("exact"), "my own words");

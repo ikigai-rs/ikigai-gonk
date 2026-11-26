@@ -1202,6 +1202,25 @@
     return text ? JSON.parse(text) : {};
   }
 
+  // ★ WHETHER THIS PAGE IS SIGNED IN, WITHOUT AN ERROR STATUS (ledger #4443). Every page load
+  // asks, signed in or not, so the question is the READ of `session` (GET /auth/session, the
+  // one ikigai-ui's shell reads since ledger #3841): it answers the request's own session from
+  // the HttpOnly cookie, and with no session answers `200 {}`. The POST of an empty body
+  // answers a signed-out caller 404, which every browser logs as a console error, on every
+  // page an anonymous reader opens. An answer with no `label` is "not signed in".
+  async function ownSession() {
+    const res = await fetch("/auth/session", {
+      headers: { Accept: "application/json" },
+      credentials: "same-origin",
+      cache: "no-store",
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(text.trim() || res.statusText);
+    const who = text ? JSON.parse(text) : {};
+    if (typeof who.label !== "string") throw new Error("not signed in");
+    return who;
+  }
+
   // ------------------------------------------------------------------ ceremonies
 
   // A WebAuthn call the browser refuses rejects with NotAllowedError whatever the cause — a
@@ -1847,7 +1866,7 @@
     canSignIn = true;
 
     try {
-      const who = await post("/auth/session", "");
+      const who = await ownSession();
       $("auth-who").textContent = "Signed in as " + who.label + " (grant " + who.grant + ")";
       $("auth-who").hidden = false;
       $("auth-logout").hidden = false;
