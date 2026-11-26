@@ -12,7 +12,10 @@ import assert from "node:assert/strict";
 
 const binary = Deno.args[0] ?? "target/debug/ikigai-gonk";
 const port = 20000 + Math.floor(Math.random() * 20000);
-const scratch = await Deno.makeTempDir({ prefix: "gonk-dashboard-operator-" });
+// A short prefix: the server's socket is <scratch>/data/gonk.sock, and a Unix socket path must
+// be under 104 bytes. Under macOS's long $TMPDIR, "gonk-dashboard-operator-" plus the 16 random
+// hex digits reached 104, and the server refused to start.
+const scratch = await Deno.makeTempDir({ prefix: "gonk-dash-op-" });
 await Deno.mkdir(`${scratch}/config`);
 await Deno.writeTextFile(`${scratch}/config/config.toml`, `gonk.port = ${port}\n`);
 const homes = ["--config-home", `${scratch}/config`, "--data-home", `${scratch}/data`];
@@ -30,8 +33,9 @@ const check = (ok, said) => {
   if (!ok) failures.push(said);
 };
 
-// A browser context signed in on `invite`, over Chromium's virtual authenticator.
-async function signedIn(invite) {
+// A browser context signed in on `invite` as a passkey labeled `label`, over Chromium's virtual
+// authenticator. Each passkey needs its own label: the server refuses a used one (ledger #3384).
+async function signedIn(invite, label) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
@@ -47,7 +51,7 @@ async function signedIn(invite) {
     },
   });
   await page.goto(invite);
-  await page.fill("#enrol-label", "keyboard");
+  await page.fill("#enrol-label", label);
   await page.locator("#enrol-form button[type=submit]").click();
   await page.locator("#status .flash.ok").waitFor();
   await page.locator("#auth-login").click();
@@ -86,7 +90,7 @@ try {
   const operator = await signedIn(await inviteFor("operator", [
     "urn:cap:kernel:inspect",
     "urn:cap:gonk:system:read",
-  ]));
+  ]), "operator keyboard");
   const page = operator.page;
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -152,7 +156,7 @@ try {
   check(errors.length === 0, `no page errors: ${errors.join("; ")}`);
 
   // A passkey with no such grant sees neither.
-  const viewer = await signedIn(await inviteFor("viewer", []));
+  const viewer = await signedIn(await inviteFor("viewer", []), "viewer keyboard");
   await viewer.page.goto(`${base}/dashboard/ledgers`);
   check(await viewer.page.locator("#dashboard-tab-cache").count() === 0, "no Cache tab for a viewer");
   check(await viewer.page.locator("#dashboard-tab-system").count() === 0, "no System tab for a viewer");

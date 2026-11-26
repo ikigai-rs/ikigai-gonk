@@ -44,15 +44,26 @@ try {
           assert.equal(await without.getAttribute("aria-describedby"), "label-filter-help");
           assert.equal(await labels.inputValue(), file === "label-filter.html" ? "needs-person" : file === "label-empty.html" ? "missing" : "");
           assert.equal(await without.inputValue(), file === "ledger.html" ? "" : "blocked");
-          // Tab reaches both fields, their submit button, then the plain filter links.
+          // Tab reaches both fields, their submit button, then the plain filter links. The
+          // phrase field (ledger #4130) sits before them, and the priority and sort fields that
+          // came with saved filters (PR 381) between them and the button.
           await page.getByRole("searchbox", { name: "Search titles or go to an item number", exact: true }).focus();
+          await page.keyboard.press("Tab");
+          assert.ok(await page.getByRole("searchbox", { name: "Exact phrase in the title", exact: true }).evaluate((node) => node === document.activeElement));
           await page.keyboard.press("Tab");
           assert.ok(await labels.evaluate((node) => node === document.activeElement));
           await page.keyboard.press("Tab");
           assert.ok(await without.evaluate((node) => node === document.activeElement));
           await page.keyboard.press("Tab");
+          assert.ok(await page.getByRole("textbox", { name: "Priority (any may match)", exact: true }).evaluate((node) => node === document.activeElement));
+          await page.keyboard.press("Tab");
+          assert.ok(await page.getByRole("textbox", { name: "Sort", exact: true }).evaluate((node) => node === document.activeElement));
+          await page.keyboard.press("Tab");
           assert.ok(await page.getByRole("button", { name: "Search", exact: true }).evaluate((node) => node === document.activeElement));
           if (file !== "ledger.html") {
+            // A filtered page offers to save its filter (PR 381) before the filter links.
+            await page.keyboard.press("Tab");
+            assert.ok(await page.locator("summary", { hasText: "Save this filter" }).evaluate((node) => node === document.activeElement));
             await page.keyboard.press("Tab");
             assert.ok(await page.getByRole("link", { name: "Clear label filters", exact: true }).evaluate((node) => node === document.activeElement));
             assert.equal(await page.getByRole("link", { name: "Exclude blocked", exact: true }).count(), 0);

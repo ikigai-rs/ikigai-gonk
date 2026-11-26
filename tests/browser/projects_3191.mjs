@@ -63,7 +63,9 @@ try {
               await page.keyboard.press("Tab");
               assert.ok(await page.locator("#ledger-filter").evaluate((node) => node === document.activeElement));
               await page.locator("#ledger-filter").fill("crew");
-              await page.waitForTimeout(350);
+              // The count is said a moment after typing stops (a 300 ms debounce in web/gonk.js);
+              // wait for the sentence rather than for a fixed time just past it.
+              await page.waitForFunction(() => document.getElementById("ledger-filter-status").textContent !== "", null, { timeout: 5000 });
               assert.equal(await page.locator("#ledger-filter-status").innerText(), "1 of 9 ledger matches.");
               assert.ok(await page.getByRole("link", { name: "Project: work", exact: true }).isVisible());
               assert.ok(await page.getByRole("link", { name: "Project: overlap", exact: true }).isVisible());
