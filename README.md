@@ -4942,6 +4942,31 @@ target/release/examples/backup-memory restore-chunks ./target/drill/backups <nam
 target/release/examples/backup-memory compare ./target/drill/source ./target/drill/restored
 ```
 
+### A tenant's own graph export
+
+A tenant reads its ledger through the store's scoped doors, and every answer there is refused
+past **100,000 quads or 16 MiB**, which a busy ledger is already past. `urn:iki:store:dump`
+streams, but it reads every graph and needs the broad `urn:cap:store:read`, which no tenant
+holds. `urn:iki:gonk:export:graph` streams one named graph whole, under the tenant's own grant
+(ledger #3649):
+
+```sh
+ikigai -c 'source urn:iki:gonk:export:graph graph=urn:iki:ledger:graph:acme' > acme.nq
+```
+
+The caller needs the read token for exactly that graph (`urn:cap:store:read:graph:<graph>`),
+which a ledger's `Read`, `Audit`, `Worker`, `Write`, `Delete` and `Purge` grants all hold, at
+every door. The export is read from one snapshot as N-Quads, 64 KiB at a time, and cut into
+windows of at most 100,000 quads and 16 MiB (further bounded by the caller's answer grants).
+Each window must be produced within the caller's time budget. **The streamed total has no
+ceiling beyond those per-window bounds**: a 5,000,000-quad ledger is about 928 MiB. A window
+past a bound, or a read error, ends the stream with an error, so a failed export is never
+mistaken for a complete one. At most two exports read at once; a third is refused `RetryAfter`.
+
+Reading an export back is the operator's restore path, not the tenant's. No tenant grant holds
+a raw write of a ledger graph, and `urn:iki:store:load` is bounded per call, so an operator
+loads a large export in pieces.
+
 ### The format is N-Quads, and the easy mistake is Turtle
 
 **CONSTRUCT returns triples.** This dataset is partitioned by named graph — one per named

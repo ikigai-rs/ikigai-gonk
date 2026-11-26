@@ -111,7 +111,9 @@
 //! `failures_in_a_row`. Neither reads as "fine".
 
 mod chunked;
+mod export;
 pub use chunked::{BACKUP_CHUNKS, RESTORE_CHUNKS};
+pub use export::EXPORT_GRAPH;
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -345,9 +347,11 @@ pub struct Backups {
 }
 
 /// The backup family's space: [`BACKUP`], [`STATUS`], [`ARCHIVE`], [`RESTORE`] and
-/// [`RESTORE_SCRIPTS`], plus [`BACKUP_CHUNKS`] and [`RESTORE_CHUNKS`].
+/// [`RESTORE_SCRIPTS`], plus [`BACKUP_CHUNKS`] and [`RESTORE_CHUNKS`], and a tenant's own
+/// graph export, [`EXPORT_GRAPH`].
 pub fn space(backups: Backups) -> EndpointSpace {
-    chunked::bind(EndpointSpace::new(), backups.clone())
+    let space = export::bind(EndpointSpace::new(), backups.clone());
+    chunked::bind(space, backups.clone())
         .bind(
             Exact::new(BACKUP),
             TakeBackup {

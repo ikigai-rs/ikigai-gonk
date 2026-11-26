@@ -158,6 +158,13 @@ fn a_malformed_or_refused_scope_is_refused_with_nothing_written() {
             stderr.contains(&format!("`{bad}`")),
             "the refusal names `{bad}`: {stderr}"
         );
+        // ★ Ledger #3827: a retired exec spelling's refusal names the spelling that replaced it.
+        if let Some(new) = ikigai_gonk::grants::exec_respelling(bad) {
+            assert!(
+                stderr.contains(&format!("`{new}`")),
+                "the refusal of `{bad}` names `{new}`: {stderr}"
+            );
+        }
         assert_eq!(
             std::fs::read_to_string(homes.grants_json()).unwrap(),
             before,
