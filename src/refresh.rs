@@ -432,6 +432,80 @@ pub struct Respelling {
     pub to: String,
 }
 
+/// The class of the log-segment entry the server writes for each [`Respelling`] its startup
+/// switch made (ledger #3827): one entry per rewritten scope, in gonk's own segment beside the
+/// passkey sign-ins, carrying `grant`, `from` and `to`.
+pub const EXEC_RESPELLED_CLASS: &str = "urn:iki:gonk:class:ExecRespelled";
+
+/// The subject of every [`EXEC_RESPELLED_CLASS`] entry: the grants file, as one resource.
+pub const GRANTS_SUBJECT: &str = "urn:iki:gonk:grants";
+
+impl Respelling {
+    /// This rewrite as one entry of gonk's log segment ([`EXEC_RESPELLED_CLASS`]), at `at`.
+    ///
+    /// ```
+    /// use ikigai_gonk::refresh::{Respelling, EXEC_RESPELLED_CLASS};
+    /// let r = Respelling {
+    ///     grant: "chris".into(),
+    ///     from: "urn:cap:exec:git".into(),
+    ///     to: "urn:cap:exec:read:git".into(),
+    /// };
+    /// let entry = r.entry(ikigai_log::Timestamp::from_millis(0));
+    /// assert_eq!(entry.get("grant"), Some("chris"));
+    /// assert_eq!(entry.get("from"), Some("urn:cap:exec:git"));
+    /// assert_eq!(entry.get("to"), Some("urn:cap:exec:read:git"));
+    /// ```
+    pub fn entry(&self, at: ikigai_log::Timestamp) -> ikigai_log::Entry {
+        ikigai_log::Entry::new(at, EXEC_RESPELLED_CLASS, GRANTS_SUBJECT)
+            .with("grant", self.grant.as_str())
+            .with("from", self.from.as_str())
+            .with("to", self.to.as_str())
+    }
+}
+
+/// The one startup line that says what the switch moved (ledger #3827), or `None` when it moved
+/// nothing.
+///
+/// ```
+/// use ikigai_gonk::refresh::{respelling_summary, Respelling};
+/// let r = |grant: &str, from: &str| Respelling {
+///     grant: grant.into(),
+///     from: from.into(),
+///     to: ikigai_gonk::grants::exec_respelling(from).unwrap().into(),
+/// };
+/// let moved = [
+///     r("a", "urn:cap:exec:git"),
+///     r("a", "urn:cap:exec:gh"),
+///     r("b", "urn:cap:exec:git"),
+/// ];
+/// assert_eq!(
+///     respelling_summary(&moved).unwrap(),
+///     "migrated 3 exec scopes in 2 grants to urn:cap:exec:read:*"
+/// );
+/// assert_eq!(
+///     respelling_summary(&moved[..1]).unwrap(),
+///     "migrated 1 exec scope in 1 grant to urn:cap:exec:read:*"
+/// );
+/// assert_eq!(respelling_summary(&[]), None);
+/// ```
+pub fn respelling_summary(moved: &[Respelling]) -> Option<String> {
+    if moved.is_empty() {
+        return None;
+    }
+    let grants = moved
+        .iter()
+        .map(|m| &m.grant)
+        .collect::<BTreeSet<_>>()
+        .len();
+    let plural =
+        |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    Some(format!(
+        "migrated {} in {} to urn:cap:exec:read:*",
+        plural(moved.len(), "exec scope", "exec scopes"),
+        plural(grants, "grant", "grants"),
+    ))
+}
+
 /// Rewrite every retired exec spelling in a parsed `grants.json` to the one that replaced it, at
 /// the same position; a grant already holding the new spelling just loses the old one, so it is
 /// held once. Every other field and token is untouched. Returns what moved, in grant order.

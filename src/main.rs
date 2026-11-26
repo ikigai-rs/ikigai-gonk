@@ -309,6 +309,9 @@ fn serve(flags: &config::Flags) -> ! {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    // ★ What moved is kept until the record opens below, where each rewrite becomes one entry
+    // of gonk's segment (ledger #3827). A start with nothing to rewrite writes nothing.
+    let mut respelled: Vec<ikigai_gonk::refresh::Respelling> = Vec::new();
     if let Some((moved, backup)) =
         ikigai_gonk::refresh::respell_exec(&layout, now_ms).unwrap_or_else(|e| fail(&e))
     {
@@ -323,6 +326,10 @@ fn serve(flags: &config::Flags) -> ! {
             layout.grants_json().display(),
             backup.display()
         );
+        if let Some(summary) = ikigai_gonk::refresh::respelling_summary(&moved) {
+            eprintln!("ikigai-gonk: {summary}");
+        }
+        respelled = moved;
     }
     quic::read_grants(&layout.grants_json())
         .and_then(|grants| quic::check_grants(&grants))
@@ -587,6 +594,20 @@ fn serve(flags: &config::Flags) -> ! {
     // before the hub, which serves it as `urn:log:*` to the owner alone (`grants::CAP_GONK_ADMIN`).
     let record =
         access::Record::open(&homes.config, &layout.log_dir()).unwrap_or_else(|e| fail(&e));
+    // The exec split's audit (ledger #3827): one entry per scope the switch above rewrote.
+    match &record {
+        Some(record) => {
+            for m in &respelled {
+                record.entry(m.entry(access::now()));
+            }
+        }
+        None if !respelled.is_empty() => eprintln!(
+            "ikigai-gonk: the log is off, so the {} exec scope rewrite(s) above are recorded \
+             only here and in the grants backup",
+            respelled.len()
+        ),
+        None => {}
+    }
     let mut trigger_spaces = match &settings.review {
         Some(t) => {
             trigger::prepare(t).unwrap_or_else(|e| fail(&e));

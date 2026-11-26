@@ -120,8 +120,9 @@ fn adding_a_grant_widens_that_passkey_only_and_is_recorded() {
     assert_eq!(changes[0].person.as_deref(), Some(now.person.as_str()));
 }
 
-/// A grant `grants.json` does not define, one it defines with no scopes, one the passkey
-/// already holds, and a passkey that does not exist: each is refused, and neither
+/// A grant `grants.json` does not define, one it defines with no scopes, one naming a retired
+/// exec spelling (refused naming the new one), one the passkey already holds, and a passkey
+/// that does not exist: each is refused, and neither
 /// `clients.json` nor `grants.json` nor the log changes.
 #[test]
 fn an_undefined_or_held_grant_is_refused_with_nothing_written() {
@@ -133,6 +134,8 @@ fn an_undefined_or_held_grant_is_refused_with_nothing_written() {
     // An empty scope list, written as a hand edit would leave it.
     let mut doc: serde_json::Value = serde_json::from_str(&read(&layout.grants_json())).unwrap();
     doc["hollow"] = serde_json::json!([]);
+    // ★ Ledger #3827: a retired exec spelling, hand-edited in after the startup switch.
+    doc["retired"] = serde_json::json!(["urn:cap:ledger:read:default", "urn:cap:exec:gh"]);
     std::fs::write(layout.grants_json(), doc.to_string()).unwrap();
     let (clients, grants, before) = (
         read(&layout.clients_json()),
@@ -144,6 +147,11 @@ fn an_undefined_or_held_grant_is_refused_with_nothing_written() {
     for (which, grant, says) in [
         (Which::Credential(&laptop_id), "nobody", "unknown"),
         (Which::Label("software-laptop"), "hollow", "no scopes"),
+        (
+            Which::Label("software-laptop"),
+            "retired",
+            "Name `urn:cap:exec:read:gh` instead",
+        ),
         (Which::Label("software-laptop"), "viewer", "already holds"),
         (Which::Label("no-such-passkey"), "viewer", "no passkey"),
     ] {
