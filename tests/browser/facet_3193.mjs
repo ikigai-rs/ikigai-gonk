@@ -72,7 +72,12 @@ try {
               assert.ok((await fallback.getAttribute("href")).includes("page=true"));
             }
           }
-          assert.equal(await page.locator("#search-priority").count(), 0);
+          // A listing filters by priority in its search form (saved filters, PR 381); the counts
+          // page has no search form. Priority counts stay plain text either way.
+          assert.equal(
+            await page.getByRole("textbox", { name: "Priority (any may match)", exact: true }).count(),
+            file === "facet-page.html" ? 0 : 1,
+          );
           assert.equal(await page.locator(".facet-terms a").filter({ hasText: "Priority" }).count(), 0);
           assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${file}: no page overflow`);
           if (javaScriptEnabled) {
