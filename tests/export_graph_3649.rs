@@ -7,8 +7,8 @@
 //! quads and about 20 MiB of N-Quads, both refuse. The rest is the fix,
 //! `urn:iki:gonk:export:graph`: the same graph, whole, under the same grant, as a stream, at the
 //! hub and through a real QUIC door (under a tenant's `Read`, and under an owner's `Write` and
-//! a worker's `Worker`, whose grants the raw-read rule narrows); another graph refused; a window past the time budget
-//! refused rather than truncated.
+//! a worker's `Worker`, whose grants the raw-read rule narrows); another graph refused; a window
+//! past the time budget refused rather than truncated.
 //!
 //! The 5,000,000-quad run is `#[ignore]`d (minutes in a debug build, beside a suite CI already
 //! spends half an hour on); run it with

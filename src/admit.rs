@@ -1124,8 +1124,6 @@ impl Endpoint for Admitted {
     }
 }
 
-/// Whether rule 6 reads this request: below root, on a door or family that reads graphs raw. A
-/// contract (`Meta`) reads none.
 /// The capability a graph export a rule narrowed to `scopes` is streamed under: those scopes,
 /// judged by rule 6 as a re-issued call would be at the next depth (refused when the narrower
 /// capability may not read the graph raw, its hidden tokens taken away), and refused when it
@@ -1151,6 +1149,8 @@ fn narrowed_for_export(inv: &Invocation<'_>, scopes: Vec<String>) -> Result<Capa
     Ok(narrowed)
 }
 
+/// Whether rule 6 reads this request: below root, on a door or family that reads graphs raw. A
+/// contract (`Meta`) reads none.
 fn raw_read_applies(id: &str, inv: &Invocation<'_>) -> bool {
     !inv.capability.is_root() && inv.request.verb != Verb::Meta && is_raw_read(id)
 }
