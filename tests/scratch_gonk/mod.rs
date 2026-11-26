@@ -195,14 +195,20 @@ impl Gonk {
     /// Start the child again over the same homes, store and socket, once the last one has
     /// exited: the ports are new, and the banner names them.
     pub fn restart(&mut self) {
+        if let Err(why) = self.try_restart() {
+            panic!("{why}");
+        }
+    }
+
+    /// [`Gonk::restart`], but a child that exits while starting is an `Err` carrying its stderr
+    /// rather than a panic: for a test of a start that must fail over these homes.
+    pub fn try_restart(&mut self) -> Result<(), String> {
         self.child = self.start.spawn(&self.socket, &self.stderr);
         self.http.set_port(0);
         if let Some(quic) = &mut self.quic {
             quic.set_port(0);
         }
-        if let Err(why) = self.until_ready() {
-            panic!("{why}");
-        }
+        self.until_ready()
     }
 
     /// Wait until every door this child opened ANSWERS — not until its files exist.

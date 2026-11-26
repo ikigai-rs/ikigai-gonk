@@ -1781,7 +1781,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::in_config_home(dir.path());
         let old = vec!["urn:cap:exec:git".to_string()];
-        assert!(put_grant(&layout, "builder", &old, true).is_err());
+        let refused = put_grant(&layout, "builder", &old, true).unwrap_err();
+        assert!(refused.contains("`urn:cap:exec:read:git`"), "{refused}");
         assert!(!layout.grants_json().exists(), "nothing was written");
     }
 

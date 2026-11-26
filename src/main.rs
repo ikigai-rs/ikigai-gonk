@@ -309,6 +309,16 @@ fn serve(flags: &config::Flags) -> ! {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
+    // ★ The one record of who did what (ledger #383): an `ikigai-log` segment in gonk's data
+    // home, hash-chained, that every door's line and every passkey sign-in lands in. Served by
+    // the hub below as `urn:log:*` to the owner alone (`grants::CAP_GONK_ADMIN`).
+    //
+    // ★ Opened BEFORE the switch below (ledger #3827): each scope the switch rewrites is written
+    // to it right after the rewrite, so a start that fails later (a refused grant, a port in
+    // use, a store still held) has already recorded the migration. The next start finds nothing
+    // to rewrite, so an entry not written here would never be written.
+    let record =
+        access::Record::open(&homes.config, &layout.log_dir()).unwrap_or_else(|e| fail(&e));
     if let Some((moved, backup)) =
         ikigai_gonk::refresh::respell_exec(&layout, now_ms).unwrap_or_else(|e| fail(&e))
     {
@@ -323,6 +333,22 @@ fn serve(flags: &config::Flags) -> ! {
             layout.grants_json().display(),
             backup.display()
         );
+        if let Some(summary) = ikigai_gonk::refresh::respelling_summary(&moved) {
+            eprintln!("ikigai-gonk: {summary}");
+        }
+        // The exec split's audit (ledger #3827): one entry per rewritten scope.
+        match &record {
+            Some(record) => {
+                for m in &moved {
+                    record.entry(m.entry(access::now()));
+                }
+            }
+            None => eprintln!(
+                "ikigai-gonk: the log is off, so the {} exec scope rewrite(s) above are recorded \
+                 only here and in the grants backup",
+                moved.len()
+            ),
+        }
     }
     quic::read_grants(&layout.grants_json())
         .and_then(|grants| quic::check_grants(&grants))
@@ -582,11 +608,6 @@ fn serve(flags: &config::Flags) -> ! {
         Some(t) => resolve_reviewer(t, &layout),
         None => None,
     };
-    // ★ The one record of who did what (ledger #383): an `ikigai-log` segment in gonk's data
-    // home, hash-chained, that every door's line and every passkey sign-in lands in. Opened
-    // before the hub, which serves it as `urn:log:*` to the owner alone (`grants::CAP_GONK_ADMIN`).
-    let record =
-        access::Record::open(&homes.config, &layout.log_dir()).unwrap_or_else(|e| fail(&e));
     let mut trigger_spaces = match &settings.review {
         Some(t) => {
             trigger::prepare(t).unwrap_or_else(|e| fail(&e));
