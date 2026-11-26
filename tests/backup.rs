@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use futures::executor::block_on;
-use ikigai_conformance::{Fixture, Suite};
+use ikigai_conformance::{Check, Fixture, Suite};
 use ikigai_core::{ArgRef, Capability, Error, Iri, Kernel, Request, Space, Verb};
 use ikigai_gonk::backup::{self, Backups};
 use ikigai_gonk::{compose_serving_with_space, compose_with, doors};
@@ -108,7 +108,7 @@ const HUB_IDS: [&str; 7] = [
     "sparql-describe",
 ];
 
-const BACKUP_IDS: [&str; 7] = [
+const BACKUP_IDS: [&str; 8] = [
     "gonk-backup",
     "gonk-backup-status",
     "gonk-backup-archive",
@@ -116,6 +116,8 @@ const BACKUP_IDS: [&str; 7] = [
     "gonk-restore-scripts",
     "gonk-backup-chunks",
     "gonk-restore-chunks",
+    // A tenant's whole-graph export (ledger #3649), beside the backup that reads the same way.
+    "gonk-export-graph",
 ];
 
 const COMPRESS_IDS: [&str; 4] = [
@@ -464,7 +466,17 @@ fn the_backup_composition_conforms() {
         .fixture(Fixture::new("gonk-backup-archive", Verb::Source).binding("name", &planted))
         .fixture(Fixture::new("gonk-backup-archive", Verb::Exists).binding("name", &planted))
         .fixture(Fixture::new("gonk-backup-status", Verb::Source))
-        .fixture(Fixture::new("gonk-backup", Verb::Source));
+        .fixture(Fixture::new("gonk-backup", Verb::Source))
+        .opt_out_check(
+            "gonk-export-graph",
+            Check::Vocabulary,
+            "an export's terms are the tenant's DATA, whatever its graph holds (here the seed's \
+             test terms), not a vocabulary this module mints",
+        )
+        .fixture(
+            Fixture::new("gonk-export-graph", Verb::Source)
+                .arg("graph", "urn:iki:ledger:graph:acme"),
+        );
     let (hub, suite) = body_conformance::wire(hub, space, suite);
     let report = suite.run_blocking(&hub);
     println!("--- backup composition ---\n{report}");

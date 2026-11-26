@@ -615,6 +615,14 @@ pub const RAW_READ_IDS: [&str; 10] = [
     "sparql-describe",
 ];
 
+/// The id of a tenant's whole-graph export, [`crate::backup::EXPORT_GRAPH`] (ledger
+/// [#3649](http://localhost:1062/l/default/item/3649)). It reads one graph by the caller's
+/// store token as the [`RAW_READ_IDS`] doors do, so rule 6 holds it exactly as it holds them,
+/// and it is the one read whose answer this overlay hands on as a STREAM at a network door
+/// (the overlay's `invoke_body`): collecting it would bound it at the run's byte budget, which
+/// is the bound it exists to get past.
+pub const EXPORT_ID: &str = "gonk-export-graph";
+
 /// Whether the endpoint described as `id` reads graphs by the caller's store tokens: a
 /// [`RAW_READ_IDS`] door, or a family whose steps do so in sub-requests inside the hub, where
 /// this overlay cannot see them. That is a plan (`plan-eval`), a script (`script-…`, its id
@@ -628,11 +636,13 @@ pub const RAW_READ_IDS: [&str; 10] = [
 /// assert!(is_raw_read("plan-eval"));
 /// assert!(is_raw_read("script-triage-result"));
 /// assert!(is_raw_read("nl-sparql-check"));
+/// assert!(is_raw_read("gonk-export-graph"));
 /// assert!(!is_raw_read("gonk-ledger"));
 /// assert!(!is_raw_read("store-graph-update"), "rule 4's");
 /// ```
 pub fn is_raw_read(id: &str) -> bool {
     RAW_READ_IDS.contains(&id)
+        || id == EXPORT_ID
         || id == "plan-eval"
         || id == "script"
         || id.starts_with("script-")
@@ -750,7 +760,7 @@ pub fn raw_read_scopes(capability: &Capability) -> Option<Vec<String>> {
 /// assert!(raw_read_refusal(&select(acme), "gonk-ledger", &closer).is_none());
 /// ```
 pub fn raw_read_refusal(request: &Request, id: &str, capability: &Capability) -> Option<String> {
-    if !RAW_READ_IDS.contains(&id) {
+    if !(RAW_READ_IDS.contains(&id) || id == EXPORT_ID) {
         return None;
     }
     let Some(ArgRef::Inline(bytes)) = request.args.get("graph") else {
@@ -978,21 +988,9 @@ struct Admitted {
 impl Admitted {
     /// Answer this invocation's request under its capability, or one level down under the
     /// narrower one rule 5 found.
-    async fn answer(
-        &self,
-        inv: &Invocation<'_>,
-        narrowed: Option<Vec<String>>,
-    ) -> Result<Representation> {
-        match narrowed {
-            None => self.inner.invoke(inv).await,
-            Some(scopes) => inv.issue_attenuated(inv.request.clone(), scopes).await,
-        }
-    }
-}
-
-#[async_trait]
-impl Endpoint for Admitted {
-    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+    /// Rules 1, 5 and 6 for `inv`, every one a request's reads go through: refused, or the
+    /// scopes to answer it under when a rule narrowed them (`None`: as it arrived).
+    fn admit_read(&self, inv: &Invocation<'_>) -> Result<Option<Vec<String>>> {
         // A sub-request is the work of a request this already admitted, under the same
         // capability; the door's refusals and the author rule are about what arrived at it.
         let arrived = inv.depth() == 0;
@@ -1017,7 +1015,7 @@ impl Endpoint for Admitted {
         // ★ Rule 6, at EVERY depth like the raw-write rule: a page's own sub-request reaches the
         // store through this overlay. A call rule 5 narrowed comes back through here at the
         // next depth, under the narrower capability, and is judged then.
-        let narrowed = match narrowed {
+        Ok(match narrowed {
             None if raw_read_applies(self.inner.name(), inv) => {
                 if let Some(why) = raw_read_refusal(inv.request, self.inner.name(), inv.capability)
                 {
@@ -1026,11 +1024,31 @@ impl Endpoint for Admitted {
                 raw_read_scopes(inv.capability)
             }
             narrowed => narrowed,
-        };
+        })
+    }
+
+    async fn answer(
+        &self,
+        inv: &Invocation<'_>,
+        narrowed: Option<Vec<String>>,
+    ) -> Result<Representation> {
+        match narrowed {
+            None => self.inner.invoke(inv).await,
+            Some(scopes) => inv.issue_attenuated(inv.request.clone(), scopes).await,
+        }
+    }
+}
+
+#[async_trait]
+impl Endpoint for Admitted {
+    async fn invoke(&self, inv: &Invocation<'_>) -> Result<Representation> {
+        let narrowed = self.admit_read(inv)?;
         if !inv.request.verb.is_mutating() {
             let answer = self.answer(inv, narrowed).await;
-            return foreign_page_explained(answer, arrived, inv.capability);
+            return foreign_page_explained(answer, inv.depth() == 0, inv.capability);
         }
+        let arrived = inv.depth() == 0;
+        let network = self.door != Door::Socket;
         // ★ At EVERY depth, unlike the checks around it (ledger #878). Nothing inside a door
         // kernel has a reason to write the store raw — the ledger's own `graph-update`s run
         // inside the hub, out of this overlay's sight — so a raw write that reaches this point
@@ -1063,6 +1081,16 @@ impl Endpoint for Admitted {
         if self.door == Door::Socket
             && !inv.request.verb.is_mutating()
             && !raw_read_applies(self.inner.name(), inv)
+        {
+            let answer = self.inner.invoke_body(inv).await;
+            return foreign_page_explained(answer, inv.depth() == 0, inv.capability);
+        }
+        // ★ A graph export (ledger #3649) is judged by every rule a read is, and then streamed
+        // at any door. Only a call a rule NARROWED is answered by re-issuing it under the
+        // narrower capability, which collects: core offers no attenuated body issue.
+        if self.inner.name() == EXPORT_ID
+            && !inv.request.verb.is_mutating()
+            && self.admit_read(inv)?.is_none()
         {
             let answer = self.inner.invoke_body(inv).await;
             return foreign_page_explained(answer, inv.depth() == 0, inv.capability);
