@@ -6,7 +6,9 @@ import { AxeBuilder } from "npm:@axe-core/playwright@4.13.0";
 import assert from "node:assert/strict";
 
 const binary = Deno.args[0] ?? "target/debug/ikigai-gonk";
-const scratch = await Deno.makeTempDir({ dir: ".", prefix: ".lifecycle-1617-" });
+// In the system temp dir, as the other server tests: gonk refuses to serve its socket under a
+// group-writable directory, which a checkout may be.
+const scratch = await Deno.makeTempDir({ prefix: "gonk-lifecycle-1617-" });
 const port = 20000 + Math.floor(Math.random() * 20000);
 const server = new Deno.Command(binary, {
   args: ["--config-home", `${scratch}/config`, "--data-home", `${scratch}/data`,

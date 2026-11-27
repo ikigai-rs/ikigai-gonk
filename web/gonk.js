@@ -31,8 +31,8 @@
 // restarting (a 502, 503 or 504) loads itself again with backoff and says so (ledger #3811).
 //
 // ★ The session cookie is set by the SERVER, HttpOnly (ledger #1591): this script never sees the
-// token. It asks the server whether it is signed in (/auth/session), and the server reads the
-// cookie; signing out is a POST the server answers by clearing it.
+// token. It asks the server whether it is signed in (a GET of /auth/session), and the server reads
+// the cookie; signing out is a POST the server answers by clearing it.
 (function () {
   "use strict";
   const $ = (id) => document.getElementById(id);
@@ -1846,13 +1846,27 @@
     $("auth-logout").addEventListener("click", signOut);
     canSignIn = true;
 
+    // ★ A SIGNED-OUT LOAD MAKES NO REQUEST THAT FAILS (ledger #4443). The question is the READ
+    // (a GET of /auth/session, ledger #3841): it answers the request's own session, and `{}`
+    // with a 200 when there is none. A POST with no body asks the same but answers a signed-out
+    // caller 404, which every browser logs as a console error on every page a reader opens.
+    let who = null;
     try {
-      const who = await post("/auth/session", "");
+      const res = await fetch("/auth/session", {
+        headers: { Accept: "application/json" },
+        cache: "no-store",
+        credentials: "same-origin",
+      });
+      if (res.ok) who = await res.json();
+    } catch (_) {
+      // No answer is no session: the sign-in button stays the way in.
+    }
+    if (who && "label" in who) {
       $("auth-who").textContent = "Signed in as " + who.label + " (grant " + who.grant + ")";
       $("auth-who").hidden = false;
       $("auth-logout").hidden = false;
       signedIn = true;
-    } catch (_) {
+    } else {
       login.hidden = false;
     }
     drawNotices(document);
