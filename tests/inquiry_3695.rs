@@ -179,10 +179,11 @@ impl Gonk {
                 body,
             );
             assert_eq!(answer.status, 200, "{answer:?}");
-            serde_json::from_str::<serde_json::Value>(&answer.body).unwrap()
+            answer
         };
         let challenge = |op: &str| {
-            json(&format!("/auth/{op}"), "{}")["challenge"]
+            serde_json::from_str::<serde_json::Value>(&json(&format!("/auth/{op}"), "{}").body)
+                .unwrap()["challenge"]
                 .as_str()
                 .unwrap()
                 .to_string()
@@ -193,13 +194,14 @@ impl Gonk {
             &authenticator.register_body(&c, &invite, &self.origin()),
         );
         let c = challenge("login-options");
-        json(
-            "/auth/login",
-            &authenticator.login_body(&c, &self.origin(), 1),
-        )["session"]
-            .as_str()
-            .unwrap()
-            .to_string()
+        // The token travels in the `Set-Cookie` only (ledger #4542).
+        common::session_cookie(
+            &json(
+                "/auth/login",
+                &authenticator.login_body(&c, &self.origin(), 1),
+            )
+            .head,
+        )
     }
 
     fn origin(&self) -> String {

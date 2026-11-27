@@ -75,6 +75,18 @@ impl Gonk {
         headers: &[(&str, String)],
         body: &str,
     ) -> (u16, String) {
+        let (status, _, body) = self.exchange(method, path, headers, body);
+        (status, body)
+    }
+
+    /// One HTTP exchange: `(status, head, body)`.
+    fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) -> (u16, String, String) {
         let mut stream = TcpStream::connect(self.http).expect("connect");
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost:{}\r\n",
@@ -98,11 +110,17 @@ impl Gonk {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or(0);
-        (status, body.to_string())
+        (status, head.to_string(), body.to_string())
     }
 
     fn auth(&self, path: &str, body: &str) -> (u16, String) {
-        self.raw(
+        let (status, _, body) = self.auth_head(path, body);
+        (status, body)
+    }
+
+    /// `auth`, keeping the head: a sign-in's token is in its `Set-Cookie` (ledger #4542).
+    fn auth_head(&self, path: &str, body: &str) -> (u16, String, String) {
+        self.exchange(
             "POST",
             path,
             &[
@@ -142,13 +160,12 @@ impl Gonk {
         );
         assert_eq!(status, 200, "{body}");
         let c = challenge("login-options");
-        let (status, body) = self.auth(
+        let (status, head, body) = self.auth_head(
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
         );
         assert_eq!(status, 200, "{body}");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        v["session"].as_str().unwrap().to_string()
+        common::session_cookie(&head)
     }
 
     /// A signed-in write through the HTTP door: `(status, body)`.

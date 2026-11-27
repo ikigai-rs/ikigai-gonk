@@ -467,6 +467,12 @@ fn root_names_have_the_same_order_regardless_of_input_order() {
 
 /// Drive the real binary's HTTP door, including its passkey ceremony.
 fn http(gonk: &Gonk, method: &str, path: &str, body: &str, token: Option<&str>) -> String {
+    let response = http_response(gonk, method, path, body, token);
+    response.split_once("\r\n\r\n").unwrap().1.to_string()
+}
+
+/// The whole 200 response, head included: a sign-in's token is in its `Set-Cookie`.
+fn http_response(gonk: &Gonk, method: &str, path: &str, body: &str, token: Option<&str>) -> String {
     use std::io::{Read, Write};
     use std::net::TcpStream;
 
@@ -490,7 +496,7 @@ fn http(gonk: &Gonk, method: &str, path: &str, body: &str, token: Option<&str>) 
     let mut response = String::new();
     stream.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    response.split_once("\r\n\r\n").unwrap().1.to_string()
+    response
 }
 
 fn sign_in_to_browse(gonk: &Gonk) -> String {
@@ -519,15 +525,13 @@ fn sign_in_to_browse(gonk: &Gonk) -> String {
         &auth.register_body(&challenge("/auth/register-options"), &invite, &origin),
         None,
     );
-    let session: serde_json::Value = serde_json::from_str(&http(
+    common::session_cookie(&http_response(
         gonk,
         "POST",
         "/auth/login",
         &auth.login_body(&challenge("/auth/login-options"), &origin, 1),
         None,
     ))
-    .unwrap();
-    session["session"].as_str().unwrap().to_string()
 }
 
 /// #3268: startup and live reload use exactly the configured GitHub root set.

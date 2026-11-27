@@ -268,6 +268,8 @@ fn view_as(host: &Host, slug: &str, cursors: Option<std::path::PathBuf>) -> Arc<
 
 struct Response {
     status: u16,
+    /// The status line and headers: a sign-in's token is in its `Set-Cookie`.
+    head: String,
     body: String,
 }
 
@@ -357,6 +359,7 @@ impl Gonk {
         let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
         Response {
             status: head.split_whitespace().nth(1).unwrap().parse().unwrap(),
+            head: head.to_string(),
             body: body.to_string(),
         }
     }
@@ -426,10 +429,11 @@ impl Gonk {
                 body,
             );
             assert_eq!(answer.status, 200, "{}", answer.body);
-            serde_json::from_str::<serde_json::Value>(&answer.body).unwrap()
+            let v = serde_json::from_str::<serde_json::Value>(&answer.body).unwrap();
+            (answer.head, v)
         };
         let challenge = |op: &str| {
-            json(&format!("/auth/{op}"), "{}")["challenge"]
+            json(&format!("/auth/{op}"), "{}").1["challenge"]
                 .as_str()
                 .unwrap()
                 .to_string()
@@ -440,13 +444,13 @@ impl Gonk {
             &authenticator.register_body(&c, &invite, &self.origin()),
         );
         let c = challenge("login-options");
-        json(
-            "/auth/login",
-            &authenticator.login_body(&c, &self.origin(), 1),
-        )["session"]
-            .as_str()
-            .unwrap()
-            .to_string()
+        common::session_cookie(
+            &json(
+                "/auth/login",
+                &authenticator.login_body(&c, &self.origin(), 1),
+            )
+            .0,
+        )
     }
 }
 

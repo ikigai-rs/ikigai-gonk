@@ -106,3 +106,21 @@ impl Authenticator {
         .to_string()
     }
 }
+
+/// The session token a sign-in answer (`login`, `add-grant`, `reassert`) opens, read from its
+/// `Set-Cookie: gonk_session=…` line in `head` (the status line and headers, or the whole raw
+/// response). That header is the only place the token travels (ledger #4542): the JSON body
+/// names the session by `sessionId`, its digest, and never carries the token, so a script on
+/// the page cannot read it. A non-browser caller, as these tests are, reads the header.
+#[allow(dead_code)]
+pub fn session_cookie(head: &str) -> String {
+    head.lines()
+        .take_while(|l| !l.is_empty())
+        .filter_map(|l| l.split_once(':'))
+        .filter(|(name, _)| name.trim().eq_ignore_ascii_case("set-cookie"))
+        .find_map(|(_, value)| value.trim().strip_prefix("gonk_session="))
+        .and_then(|v| v.split(';').next())
+        .filter(|token| !token.is_empty())
+        .unwrap_or_else(|| panic!("no session cookie in {head}"))
+        .to_string()
+}

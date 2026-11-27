@@ -239,8 +239,7 @@ impl Server {
             &authenticator.login_body(&c, &self.origin(), 1),
         );
         assert_eq!(login.status, 200, "{login:?}");
-        let v: serde_json::Value = serde_json::from_str(&login.text()).unwrap();
-        v["session"].as_str().unwrap().to_string()
+        common::session_cookie(&login.head)
     }
 
     /// A person opening a page by typing its address.

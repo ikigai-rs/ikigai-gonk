@@ -170,6 +170,7 @@ impl Server {
             .unwrap_or_else(|| panic!("no status line: {response}"));
         Response {
             status,
+            head: head.to_string(),
             body: body.chars().take(2_000).collect(),
         }
     }
@@ -233,8 +234,7 @@ impl Server {
             &authenticator.login_body(&c, &self.origin(), 1),
         );
         assert_eq!(login.status, 200, "{login:?}");
-        let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
-        v["session"].as_str().unwrap().to_string()
+        common::session_cookie(&login.head)
     }
 
     fn challenge(&self, op: &str) -> String {
@@ -247,6 +247,8 @@ impl Server {
 
 struct Response {
     status: u16,
+    /// The status line and headers: a sign-in's token is in its `Set-Cookie`.
+    head: String,
     body: String,
 }
 

@@ -3405,6 +3405,19 @@ impl HttpDoorHarness {
         headers: &[(&str, String)],
         body: &str,
     ) -> (u16, String) {
+        let (status, _, body) = self.raw_to_head(method, path, host, headers, body);
+        (status, body)
+    }
+
+    /// [`Self::raw_to`], with the response head too: a sign-in's token is in its `Set-Cookie`.
+    fn raw_to_head(
+        &self,
+        method: &str,
+        path: &str,
+        host: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) -> (u16, String, String) {
         let mut stream = TcpStream::connect(self.addr).expect("connect");
         let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\n");
         for (k, v) in headers {
@@ -3424,7 +3437,7 @@ impl HttpDoorHarness {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or_else(|| panic!("no status line: {response}"));
-        (status, body.to_string())
+        (status, head.to_string(), body.to_string())
     }
 
     /// A GET asking for the store's own result format, with an optional session cookie.
@@ -3500,9 +3513,16 @@ impl HttpDoorHarness {
     }
 
     fn post_json(&self, path: &str, body: &str) -> (u16, String) {
-        self.raw(
+        let (status, _, body) = self.post_json_head(path, body);
+        (status, body)
+    }
+
+    /// [`Self::post_json`], with the response head: a sign-in's token is in its `Set-Cookie`.
+    fn post_json_head(&self, path: &str, body: &str) -> (u16, String, String) {
+        self.raw_to_head(
             "POST",
             path,
+            &format!("localhost:{}", self.addr.port()),
             &[
                 ("Accept", "application/json".to_string()),
                 ("Content-Type", "application/json".to_string()),
@@ -3556,13 +3576,12 @@ impl HttpDoorHarness {
         );
         assert_eq!(status, 200, "{body}");
         let c = self.challenge("login-options");
-        let (status, body) = self.post_json(
+        let (status, head, body) = self.post_json_head(
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
         );
         assert_eq!(status, 200, "{body}");
-        let v: serde_json::Value = serde_json::from_str(&body).expect("a session");
-        v["session"].as_str().expect("session").to_string()
+        common::session_cookie(&head)
     }
 }
 
