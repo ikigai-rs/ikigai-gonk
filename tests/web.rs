@@ -2351,8 +2351,7 @@ fn a_passkey_identity_adds_its_grant_and_only_its_grant() {
         &authenticator.login_body(&c, &server.origin(), 1),
     );
     assert_eq!(login.status, 200, "{login:?}");
-    let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
-    let token = v["session"].as_str().unwrap().to_string();
+    let token = common::session_cookie(&login.head);
     let replay = server.json(
         "/auth/login",
         &authenticator.login_body(&c, &server.origin(), 2),
@@ -2551,8 +2550,7 @@ fn sign_in(server: &Server, grant: &str, scopes: &[String]) -> (String, String) 
         &authenticator.login_body(&c, &server.origin(), 1),
     );
     assert_eq!(login.status, 200, "{login:?}");
-    let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
-    let token = v["session"].as_str().unwrap().to_string();
+    let token = common::session_cookie(&login.head);
     // ★ What the door stamps: the passkey's PERSON (ledger #4305).
     let iri = identity::read_passkeys(&server.layout).unwrap()
         [&URL_SAFE_NO_PAD.encode(&authenticator.id)]
@@ -5639,8 +5637,7 @@ fn two_session_cookies_sign_the_request_in_as_nobody() {
     let c = challenge(&server, "login-options");
     let login = server.json("/auth/login", &other.login_body(&c, &server.origin(), 1));
     assert_eq!(login.status, 200, "{login:?}");
-    let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
-    let theirs = v["session"].as_str().unwrap().to_string();
+    let theirs = common::session_cookie(&login.head);
 
     let session = |cookie: String| {
         server.raw(
@@ -5714,8 +5711,7 @@ fn the_passkey_resource_never_answers_for_another_session_of_the_person() {
         let c = challenge(&server, "login-options");
         let login = server.json("/auth/login", &auth.login_body(&c, &server.origin(), 1));
         assert_eq!(login.status, 200, "{login:?}");
-        let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
-        v["session"].as_str().unwrap().to_string()
+        common::session_cookie(&login.head)
     };
     let at_laptop = login(&laptop);
     std::thread::sleep(Duration::from_millis(1100));

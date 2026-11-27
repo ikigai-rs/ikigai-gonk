@@ -449,6 +449,12 @@ fn passkey_list_shows_every_grant_and_each_widening() {
 }
 
 fn post(gonk: &Gonk, path: &str, body: &str) -> (u16, String) {
+    let (status, _, body) = post_head(gonk, path, body);
+    (status, body)
+}
+
+/// `post`, keeping the head: a sign-in's token is in its `Set-Cookie` (ledger #4542).
+fn post_head(gonk: &Gonk, path: &str, body: &str) -> (u16, String, String) {
     let mut stream = TcpStream::connect(gonk.http).expect("connect");
     let head = format!(
         "POST {path} HTTP/1.1\r\nHost: localhost:{port}\r\nAccept: application/json\r\n\
@@ -463,7 +469,7 @@ fn post(gonk: &Gonk, path: &str, body: &str) -> (u16, String) {
     stream.read_to_string(&mut response).unwrap();
     let (head, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
     let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
-    (status, body.to_string())
+    (status, head.to_string(), body.to_string())
 }
 
 /// The page's two steps over real HTTP: `add-grant-options` names the grant and the passkey
@@ -486,16 +492,13 @@ fn redeeming_while_signed_in_works_over_http() {
     assert_eq!(status, 200, "{body}");
     let (_, options) = post(&gonk, "/auth/login-options", "{}");
     let challenge: Value = serde_json::from_str(&options).unwrap();
-    let (status, body) = post(
+    let (status, head, body) = post_head(
         &gonk,
         "/auth/login",
         &laptop.login_body(challenge["challenge"].as_str().unwrap(), &origin, 1),
     );
     assert_eq!(status, 200, "{body}");
-    let session = serde_json::from_str::<Value>(&body).unwrap()["session"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let session = common::session_cookie(&head);
 
     let write = grants_for("default", Authority::Write).unwrap();
     let code = identity::invite(&gonk.layout, "writer", &write, false, 5, now).unwrap();
@@ -518,14 +521,18 @@ fn redeeming_while_signed_in_works_over_http() {
         &session,
         &code,
     );
-    let (status, body) = post(&gonk, "/auth/add-grant", &widen);
+    let (status, head, body) = post_head(&gonk, "/auth/add-grant", &widen);
     assert_eq!(status, 200, "{body}");
     let done: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(done["added"], "writer");
     assert_eq!(done["grants"], json!(["viewer", "writer"]));
     assert_eq!(done["grant"], "viewer, writer");
-    let fresh = done["session"].as_str().unwrap();
-    assert_ne!(fresh, session);
+    let fresh = &common::session_cookie(&head);
+    assert!(
+        done.get("session").is_none(),
+        "the token is not in the body: {body}"
+    );
+    assert_ne!(fresh, &session);
 
     let (status, _) = post(&gonk, "/auth/session", &session);
     assert_eq!(status, 404, "the old session ended");

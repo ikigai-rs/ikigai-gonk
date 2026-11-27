@@ -215,6 +215,18 @@ impl Running {
         headers: &[(&str, String)],
         body: &str,
     ) -> (u16, String) {
+        let (status, _, body) = self.exchange(method, path, headers, body);
+        (status, body)
+    }
+
+    /// One HTTP exchange: `(status, head, body)`.
+    fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) -> (u16, String, String) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost:{}\r\n",
@@ -237,12 +249,18 @@ impl Running {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or_else(|| panic!("no status line: {response}"));
-        (status, body.to_string())
+        (status, head.to_string(), body.to_string())
     }
 
     /// A same-origin JSON post, as gonk.js makes one.
     fn json(&self, path: &str, body: &str) -> (u16, String) {
-        self.request(
+        let (status, _, body) = self.json_head(path, body);
+        (status, body)
+    }
+
+    /// `json`, keeping the head: a sign-in's token is in its `Set-Cookie` (ledger #4542).
+    fn json_head(&self, path: &str, body: &str) -> (u16, String, String) {
+        self.exchange(
             "POST",
             path,
             &[
@@ -340,13 +358,12 @@ fn a_passkey_enrolled_over_http_survives_a_restart() {
 
     // And the passkey still signs in, at the new port's origin.
     let c = second.challenge("login-options");
-    let (status, body) = second.json(
+    let (status, head, body) = second.json_head(
         "/auth/login",
         &Authenticator::new().login_body(&c, &second.origin(), 1),
     );
     assert_eq!(status, 200, "{body}");
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let (status, who) = second.json("/auth/session", v["session"].as_str().unwrap());
+    let (status, who) = second.json("/auth/session", &common::session_cookie(&head));
     assert_eq!(status, 200, "{who}");
     assert!(who.contains("\"grant\":\"brian\""), "{who}");
 }

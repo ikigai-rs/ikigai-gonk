@@ -273,6 +273,18 @@ impl Gonk {
         headers: &[(&str, String)],
         body: &str,
     ) -> (u16, String) {
+        let (status, _, body) = self.raw_head(method, path, headers, body);
+        (status, body)
+    }
+
+    /// [`Self::raw`], with the response head too: a sign-in's token is in its `Set-Cookie`.
+    fn raw_head(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) -> (u16, String, String) {
         let mut stream = TcpStream::connect(self.addr).expect("connect");
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost:{}\r\n",
@@ -296,7 +308,7 @@ impl Gonk {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or_else(|| panic!("no status line for {method} {path}: {response}"));
-        (status, body.to_string())
+        (status, head.to_string(), body.to_string())
     }
 
     /// A GET of `path`, labeled as `from` labels it, carrying `session` as gonk's cookie.
@@ -348,7 +360,13 @@ impl Gonk {
     }
 
     fn post_json(&self, path: &str, body: &str) -> (u16, String) {
-        self.raw(
+        let (status, _, body) = self.post_json_head(path, body);
+        (status, body)
+    }
+
+    /// [`Self::post_json`], with the response head: a sign-in's token is in its `Set-Cookie`.
+    fn post_json_head(&self, path: &str, body: &str) -> (u16, String, String) {
+        self.raw_head(
             "POST",
             path,
             &[
@@ -392,13 +410,12 @@ impl Gonk {
         );
         assert_eq!(status, 200, "{body}");
         let c = self.challenge("login-options");
-        let (status, body) = self.post_json(
+        let (status, head, body) = self.post_json_head(
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
         );
         assert_eq!(status, 200, "{body}");
-        let v: serde_json::Value = serde_json::from_str(&body).expect("a session");
-        v["session"].as_str().expect("session").to_string()
+        common::session_cookie(&head)
     }
 
     fn calls(&self) -> usize {

@@ -32,6 +32,18 @@ fn raw(
     headers: &[(&str, String)],
     body: &str,
 ) -> (u16, String) {
+    let (status, _, body) = exchange(gonk, method, path, headers, body);
+    (status, body)
+}
+
+/// One raw HTTP request: the status, the head and the body.
+fn exchange(
+    gonk: &Gonk,
+    method: &str,
+    path: &str,
+    headers: &[(&str, String)],
+    body: &str,
+) -> (u16, String, String) {
     let mut stream = TcpStream::connect(gonk.http).expect("connect");
     let mut head = format!(
         "{method} {path} HTTP/1.1\r\nHost: localhost:{}\r\n",
@@ -55,7 +67,7 @@ fn raw(
         .nth(1)
         .and_then(|code| code.parse().ok())
         .unwrap_or(0);
-    (status, body.to_string())
+    (status, head.to_string(), body.to_string())
 }
 
 fn origin(gonk: &Gonk) -> String {
@@ -63,7 +75,13 @@ fn origin(gonk: &Gonk) -> String {
 }
 
 fn json(gonk: &Gonk, path: &str, body: &str) -> (u16, String) {
-    raw(
+    let (status, _, body) = json_head(gonk, path, body);
+    (status, body)
+}
+
+/// `json`, keeping the head: a sign-in's token is in its `Set-Cookie` (ledger #4542).
+fn json_head(gonk: &Gonk, path: &str, body: &str) -> (u16, String, String) {
+    exchange(
         gonk,
         "POST",
         path,
@@ -115,14 +133,13 @@ fn sign_in(gonk: &Gonk) -> String {
     );
     assert_eq!(status, 200, "{body}");
     let c = challenge("login-options");
-    let (status, body) = json(
+    let (status, head, body) = json_head(
         gonk,
         "/auth/login",
         &authenticator.login_body(&c, &origin(gonk), 1),
     );
     assert_eq!(status, 200, "{body}");
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    v["session"].as_str().unwrap().to_string()
+    common::session_cookie(&head)
 }
 
 fn request(verb: Verb, iri: &str, args: &[(&str, &str)]) -> Request {

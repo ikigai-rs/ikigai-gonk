@@ -5492,9 +5492,11 @@ impl Endpoint for PasskeyDoor {
                     .add_grant_at(&site, content.as_bytes(), door, now)
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
+                // ★ The token travels in the `Set-Cookie` only (ledger #4542): the page's script
+                // reads this body, so a token here would undo `HttpOnly`. `sessionId` is its
+                // digest, which names the session and authorizes nothing.
                 with_cookie(
                     json_repr(json!({
-                        "session": token,
                         "sessionId": identity::session_id(&token),
                         "seconds": who.expires.saturating_sub(now),
                         "label": who.enrolled.label,
@@ -5511,9 +5513,9 @@ impl Endpoint for PasskeyDoor {
                     .login_at(&site, content.as_bytes(), now)
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
+                // The token in the `Set-Cookie` only, as `add-grant` (ledger #4542).
                 with_cookie(
                     json_repr(json!({
-                        "session": token,
                         "sessionId": identity::session_id(&token),
                         "seconds": seconds,
                         "label": who.enrolled.label,
@@ -5551,8 +5553,8 @@ impl Endpoint for PasskeyDoor {
                     .reassert_at(&site, content.as_bytes(), door, now)
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
+                // The token in the `Set-Cookie` only, as `add-grant` (ledger #4542).
                 let mut answer = session_answer(&who, now);
-                answer["session"] = json!(token);
                 answer["sessionId"] = json!(identity::session_id(&token));
                 with_cookie(json_repr(answer), &site.session_cookie(&token, seconds))
             }

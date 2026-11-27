@@ -34,6 +34,18 @@ impl Gonk {
         headers: &[(&str, String)],
         body: &str,
     ) -> (u16, String) {
+        let (status, _, body) = self.raw_head(method, path, headers, body);
+        (status, body)
+    }
+
+    /// [`Self::raw`], with the response head too: a sign-in's token is in its `Set-Cookie`.
+    fn raw_head(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, String)],
+        body: &str,
+    ) -> (u16, String, String) {
         let mut stream = TcpStream::connect(self.http).expect("connect");
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost:{}\r\n",
@@ -57,7 +69,7 @@ impl Gonk {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or(0);
-        (status, body.to_string())
+        (status, head.to_string(), body.to_string())
     }
 
     fn json(&self, path: &str, body: &str) -> (u16, String) {
@@ -99,13 +111,19 @@ impl Gonk {
         );
         assert_eq!(status, 200, "{body}");
         let c = challenge("login-options");
-        let (status, body) = self.json(
+        let (status, head, body) = self.raw_head(
+            "POST",
             "/auth/login",
+            &[
+                ("Accept", "application/json".to_string()),
+                ("Content-Type", "application/json".to_string()),
+                ("Origin", self.origin()),
+                ("Sec-Fetch-Site", "same-origin".to_string()),
+            ],
             &authenticator.login_body(&c, &self.origin(), 1),
         );
         assert_eq!(status, 200, "{body}");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        v["session"].as_str().unwrap().to_string()
+        common::session_cookie(&head)
     }
 
     fn over_socket(&self, request: Request) -> Result<Representation, Error> {

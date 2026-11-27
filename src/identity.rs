@@ -132,12 +132,18 @@
 //!   rewritten whole; a session that ended is gone from it, and its ending is in the segment.
 //!
 //! ★ **The server sets the session cookie, `HttpOnly`** ([#1591](http://localhost:1062/l/default/item/1591)):
-//! `login` and `add-grant` answer through `ikigai_web::with_headers` with a `Set-Cookie`
-//! ([`session_cookie`]), and the HTTP door accepts that header from an endpoint
-//! (`EndpointHeader::SetCookie`, `crate::doors::edge_config_with`). No script on any
-//! `http://localhost:*` page (cookies are scoped by host, not port) can read the token. The page
-//! names no token: `session`, `logout`, `logout-all` and `add-grant` read the passkey from the
-//! capability's principal, which the door derives from the cookie.
+//! `login`, `add-grant` and `reassert` answer through `ikigai_web::with_headers` with a
+//! `Set-Cookie` ([`session_cookie`]), and the HTTP door accepts that header from an endpoint
+//! (`EndpointHeader::SetCookie`, `crate::doors::edge_config_with`). The `Set-Cookie` is the ONLY
+//! place the token travels over HTTP (ledger [#4542](http://localhost:1062/l/default/item/4542)):
+//! the JSON body of those answers, which the script that asked reads, carries `sessionId` (the
+//! token's SHA-256, which names a session for `reassert-options` and authorizes nothing) and
+//! never the token. So no script on any `http://localhost:*` page (cookies are scoped by host,
+//! not port), the page's own included, can read the token, and nothing that logs response
+//! bodies records it. The page names no token: `session`, `logout`, `logout-all`,
+//! `add-grant-options` and `add-grant` read the passkey from the capability's principal, which
+//! the door derives from the cookie. A caller that holds a token another way (the socket, the
+//! Rust API, whose [`Passkeys::login`] returns it) may still name it in a request body.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
