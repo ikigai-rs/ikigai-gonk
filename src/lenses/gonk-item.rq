@@ -1,0 +1,64 @@
+# The item lens (workspace.md section 7, proposal 14; ledger #3959): one row per part of the item
+# at ?focus, an item IRI `urn:iki:ledger:{ledger}:item:{id}`. Its title, its state, its children
+# (the items whose `parent` link names it), its comments, and its verdict. The verdict is the
+# dispatcher's close and its evidence (decision 17): the item's latest status event, while the
+# item is closed, and every `ledger:evidence` that event names. The judge's verdicts on findings
+# belong to the review pane, and a `verdict:` line in a close note is shown as the comment it is.
+PREFIX ledger: <https://ikigai-rs.dev/ns/ledger#>
+PREFIX dcterms: <http://purl.org/dc/terms/>
+SELECT ?focus ?part ?resource ?text ?at WHERE {
+  ?focus a ledger:Item .
+  {
+    ?focus dcterms:title ?text .
+    OPTIONAL { ?focus dcterms:created ?at }
+    BIND("item" AS ?part) BIND(?focus AS ?resource) BIND(1 AS ?order)
+  } UNION {
+    ?focus ledger:status ?status .
+    OPTIONAL { ?focus ledger:claimedBy ?holder }
+    OPTIONAL { ?focus dcterms:modified ?at }
+    BIND(IF(?status = ledger:closed, "closed",
+            IF(BOUND(?holder), CONCAT("in flight, held by ", STR(?holder)), "open")) AS ?text)
+    BIND("state" AS ?part) BIND(2 AS ?order)
+  } UNION {
+    ?resource ledger:parent ?focus ;
+              dcterms:title ?title ;
+              ledger:number ?number ;
+              ledger:status ?childStatus .
+    BIND(CONCAT("#", STR(?number), " ", ?title,
+                IF(?childStatus = ledger:closed, " (closed)", " (open)")) AS ?text)
+    BIND("child" AS ?part) BIND(3 AS ?order)
+  } UNION {
+    ?resource a ledger:Comment ;
+              ledger:onItem ?focus ;
+              ledger:body ?text ;
+              dcterms:created ?at .
+    BIND("comment" AS ?part) BIND(4 AS ?order)
+  } UNION {
+    ?focus ledger:status ledger:closed .
+    ?resource a ledger:StatusEvent ;
+              ledger:onItem ?focus ;
+              ledger:status ledger:closed ;
+              ledger:closedReason ?reason ;
+              dcterms:created ?at .
+    FILTER NOT EXISTS {
+      ?later a ledger:StatusEvent ; ledger:onItem ?focus ; dcterms:created ?laterAt .
+      FILTER(?laterAt > ?at)
+    }
+    BIND(CONCAT("closed ", REPLACE(STR(?reason), "^.*#", "")) AS ?text)
+    BIND("close" AS ?part) BIND(5 AS ?order)
+  } UNION {
+    ?focus ledger:status ledger:closed .
+    ?close a ledger:StatusEvent ;
+           ledger:onItem ?focus ;
+           ledger:status ledger:closed ;
+           ledger:evidence ?resource ;
+           dcterms:created ?at .
+    FILTER NOT EXISTS {
+      ?later a ledger:StatusEvent ; ledger:onItem ?focus ; dcterms:created ?laterAt .
+      FILTER(?laterAt > ?at)
+    }
+    BIND(STR(?resource) AS ?text)
+    BIND("evidence" AS ?part) BIND(6 AS ?order)
+  }
+}
+ORDER BY ?order ?at ?resource

@@ -79,6 +79,7 @@ pub mod lapse;
 pub mod layer;
 pub mod layer_kinds;
 pub mod layers_view;
+pub mod lenses;
 pub mod logfile;
 pub mod mirror;
 pub mod mount;

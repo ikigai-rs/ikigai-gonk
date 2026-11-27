@@ -365,7 +365,7 @@ fn a_door_kernel_conforms_like_the_hub() {
 }
 
 /// The HTTP door's own resources: bound only in [`doors::http_kernel`].
-const WEB_IDS: [&str; 53] = [
+const WEB_IDS: [&str; 58] = [
     "gonk-k",
     "gonk-browse-page",
     "gonk-browse-roots",
@@ -426,6 +426,12 @@ const WEB_IDS: [&str; 53] = [
     "gonk-harness-page",
     // A browse root's description, which harness packs' shapes are checked against (#3786).
     "gonk-root-description",
+    // The item lens and the Dashboard lens, the item type's lens list (ledger #3959).
+    "gonk-lens-type-item",
+    "gonk-lens-gonk-item",
+    "gonk-lens-gonk-item-query",
+    "gonk-lens-gonk-dashboard",
+    "gonk-lens-gonk-dashboard-query",
 ];
 
 /// `ikigai_ui::space()` in the HTTP door (ledger #2834): the shared UI artifacts, inherited like
