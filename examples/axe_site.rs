@@ -60,6 +60,7 @@ const PAGES: [(&str, &str); 43] = [
     ("search.html", "/l/default?text=a"),
     ("search-relevance.html", "/l/default?text=a&sort=relevance"),
     ("search-phrase.html", "/l/default?phrase=a"),
+    // Ledger #3024: item 1 carries the Agent sessions table.
     ("item.html", "/l/default/item/1"),
     ("linked-item.html", "/l/default/item/4"),
     // Ledger #3217: an item blocked from three ledgers, with its inbound links panel.
@@ -694,7 +695,7 @@ fn main() {
     ))
     .unwrap()
     .bytes;
-    block_on(Kernel::issue(
+    let checked = block_on(Kernel::issue(
         &hub,
         Request::new(
             Verb::Sink,
@@ -723,6 +724,44 @@ fn main() {
         &Capability::root(),
     ))
     .expect("the scratch item");
+    // Ledger #3024: item 1 is worked by two agents, one of which reported no turns or tokens,
+    // so `item.html` carries the Agent sessions table, "not reported" cells included.
+    let checked = appended_iri(&checked.bytes, "default");
+    for summary in [
+        r#"{"session": "claude-run", "machineName": "lawnboy", "harness": "claude",
+                "model": "claude-opus-5-5", "exitStatus": 0, "wallClockMs": 1830000,
+                "turns": 41, "toolCalls": 118, "inputTokens": 5120,
+                "cachedInputTokens": 880000, "cacheCreationTokens": 64000,
+                "outputTokens": 21000}"#,
+        r#"{"session": "codex-run", "machineName": "dogcow", "harness": "codex",
+                "model": "a-model-with-a-rather-long-name-2026-11", "exitStatus": 1,
+                "wallClockMs": 850}"#,
+    ] {
+        for (action, args) in [
+            ("claim", vec![("content", "w1"), ("lease", "1h")]),
+            ("comment", vec![("content", "done"), ("handback", "true")]),
+        ] {
+            let mut request = Request::new(
+                Verb::Sink,
+                Iri::parse(format!("urn:iki:ledger:{action}")).expect("an IRI"),
+            )
+            .with_arg("item", ArgRef::Inline(checked.clone().into_bytes()));
+            for (name, value) in args {
+                request = request.with_arg(name, ArgRef::Inline(value.as_bytes().to_vec()));
+            }
+            block_on(Kernel::issue(&hub, request, &Capability::root())).expect("a hand-back");
+        }
+        block_on(Kernel::issue(
+            &hub,
+            Request::new(
+                Verb::Sink,
+                Iri::parse(format!("{checked}:sessions")).expect("an IRI"),
+            )
+            .with_arg("content", ArgRef::Inline(summary.as_bytes().to_vec())),
+            &Capability::root(),
+        ))
+        .expect("a session summary");
+    }
     let crew = block_on(Kernel::issue(
         &hub,
         Request::new(

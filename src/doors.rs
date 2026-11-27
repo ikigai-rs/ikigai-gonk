@@ -1433,12 +1433,30 @@ fn same_origin(request: &HttpRequest, bind: SocketAddr) -> bool {
     }
 }
 
-/// The session token in the request's `Cookie` header.
+/// The session token in the request's `Cookie` header, when it carries exactly ONE
+/// [`identity::SESSION_COOKIE`]; with none, or more than one, the request has no session.
+///
+/// ★ Cookies ignore the port, so a page on another localhost port (ledger #880) can set a
+/// second `gonk_session` cookie; with a longer `Path` the browser sends it FIRST, ahead of the
+/// HttpOnly one gonk set. gonk sets only one, and nothing in the header says which of two is
+/// gonk's, so the request used to run as whichever came first. Now neither is used: the page
+/// reads as signed out rather than signed in as a passkey someone else chose. Every `Cookie`
+/// header counts, not only the first.
 fn session_token(request: &HttpRequest) -> Option<String> {
-    request.header("cookie")?.split(';').find_map(|pair| {
-        let (name, value) = pair.trim().split_once('=')?;
-        (name == identity::SESSION_COOKIE && !value.is_empty()).then(|| value.to_string())
-    })
+    let mut values = request
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+        .flat_map(|(_, value)| value.split(';'))
+        .filter_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            (name.trim() == identity::SESSION_COOKIE).then(|| value.trim())
+        });
+    let value = values.next()?;
+    if values.next().is_some() {
+        return None;
+    }
+    (!value.is_empty()).then(|| value.to_string())
 }
 
 /// The HTTP door's edge policy: `ikigai-web`'s strict defaults, an explicit route table, and

@@ -5609,3 +5609,363 @@ fn the_facet_json_face_carries_the_counts_the_html_shows() {
         406
     );
 }
+
+/// Cookies ignore the port, so a page on another localhost port (ledger #880) can set a
+/// second `gonk_session` cookie with a longer `Path` (`document.cookie = "gonk_session=<a
+/// token of its own>; Path=/l"`). The browser then sends it FIRST, ahead of the HttpOnly one
+/// gonk set, and gonk never sets a second. The request used to run as whichever session came
+/// first; with two `gonk_session` cookies it is now signed in as nobody.
+#[test]
+fn two_session_cookies_sign_the_request_in_as_nobody() {
+    let server = Server::start();
+    let scopes = grants_for("default", Authority::Write).unwrap();
+    let (mine, _) = sign_in(&server, "brian", &scopes);
+    let other = Authenticator::named("other");
+    let invite = identity::invite(
+        &server.layout,
+        "other",
+        &scopes,
+        false,
+        30,
+        identity::now_seconds(),
+    )
+    .unwrap();
+    let c = challenge(&server, "register-options");
+    let enrolled = server.json(
+        "/auth/register",
+        &other.register_body_labeled(&c, &invite, &server.origin(), "other"),
+    );
+    assert_eq!(enrolled.status, 200, "{enrolled:?}");
+    let c = challenge(&server, "login-options");
+    let login = server.json("/auth/login", &other.login_body(&c, &server.origin(), 1));
+    assert_eq!(login.status, 200, "{login:?}");
+    let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
+    let theirs = v["session"].as_str().unwrap().to_string();
+
+    let session = |cookie: String| {
+        server.raw(
+            "GET",
+            "/auth/session",
+            &[
+                ("Cookie", cookie),
+                ("Sec-Fetch-Site", "same-origin".to_string()),
+            ],
+            "",
+        )
+    };
+    let name = identity::SESSION_COOKIE;
+    let got = session(format!("{name}={theirs}; {name}={mine}"));
+    assert_eq!(got.status, 200, "{got:?}");
+    assert!(
+        !got.body.contains("\"other\""),
+        "the browser is signed in as the passkey another port's page chose: {}",
+        got.body
+    );
+    assert_eq!(got.body.trim(), "{}", "signed in as nobody: {}", got.body);
+    // Either order, and with an unrelated cookie between them.
+    let got = session(format!("{name}={mine}; theme=dark; {name}={theirs}"));
+    assert_eq!(got.body.trim(), "{}", "{}", got.body);
+    // One cookie still signs in, beside unrelated ones.
+    let got = session(format!("theme=dark; {name}={mine}"));
+    assert!(got.body.contains("\"writeSeconds\""), "{}", got.body);
+}
+
+/// The passkey resource answers only for the session the request's cookie names, whatever
+/// route reached it. Through `/auth/{op}` the door hands it that session's key (ledger #4363);
+/// a request that reaches it another way (`/iki/gonk/passkey/session`) carries only the
+/// person, and used to be answered from, and refresh, the person's NEWEST session: here the
+/// phone's, when the laptop asked. It is now answered as nobody.
+#[test]
+fn the_passkey_resource_never_answers_for_another_session_of_the_person() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    let server = Server::start();
+    let scopes = grants_for("default", Authority::Write).unwrap();
+    let laptop = Authenticator::named("laptop");
+    let phone = Authenticator::named("phone");
+    let invite = identity::invite(
+        &server.layout,
+        "brian",
+        &scopes,
+        false,
+        30,
+        identity::now_seconds(),
+    )
+    .unwrap();
+    let c = challenge(&server, "register-options");
+    let enrolled = server.json(
+        "/auth/register",
+        &laptop.register_body_labeled(&c, &invite, &server.origin(), "laptop"),
+    );
+    assert_eq!(enrolled.status, 200, "{enrolled:?}");
+    let person = identity::read_passkeys(&server.layout).unwrap()
+        [&URL_SAFE_NO_PAD.encode(&laptop.id)]
+        .person
+        .clone();
+    let (code, _, _) =
+        identity::invite_person(&server.layout, &person, 30, identity::now_seconds()).unwrap();
+    let c = challenge(&server, "register-options");
+    let enrolled = server.json(
+        "/auth/register",
+        &phone.register_body_labeled(&c, &code, &server.origin(), "phone"),
+    );
+    assert_eq!(enrolled.status, 200, "{enrolled:?}");
+    let login = |auth: &Authenticator| {
+        let c = challenge(&server, "login-options");
+        let login = server.json("/auth/login", &auth.login_body(&c, &server.origin(), 1));
+        assert_eq!(login.status, 200, "{login:?}");
+        let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
+        v["session"].as_str().unwrap().to_string()
+    };
+    let at_laptop = login(&laptop);
+    std::thread::sleep(Duration::from_millis(1100));
+    let _at_phone = login(&phone);
+
+    let get = |path: &str| {
+        server.raw(
+            "GET",
+            path,
+            &[
+                (
+                    "Cookie",
+                    format!("{}={at_laptop}", identity::SESSION_COOKIE),
+                ),
+                ("Sec-Fetch-Site", "same-origin".to_string()),
+            ],
+            "",
+        )
+    };
+    let own = get("/auth/session");
+    assert_eq!(own.status, 200, "{own:?}");
+    assert!(own.body.contains("\"laptop\""), "{}", own.body);
+    let other_route = get("/iki/gonk/passkey/session");
+    assert!(
+        !other_route.body.contains("\"phone\""),
+        "the laptop's request was answered for the phone's session: {other_route:?}"
+    );
+    assert_eq!(other_route.status, 200, "{other_route:?}");
+    assert_eq!(
+        other_route.body.trim(),
+        "{}",
+        "answered as signed in as nobody: {other_route:?}"
+    );
+
+    // A sign-out by that route ends nothing, and says which route does.
+    let ended = server.raw(
+        "POST",
+        "/iki/gonk/passkey/logout-all",
+        &[
+            ("Accept", "application/json".to_string()),
+            ("Content-Type", "application/json".to_string()),
+            ("Origin", server.origin()),
+            ("Sec-Fetch-Site", "same-origin".to_string()),
+            (
+                "Cookie",
+                format!("{}={at_laptop}", identity::SESSION_COOKIE),
+            ),
+        ],
+        "",
+    );
+    assert_eq!(ended.status, 404, "{ended:?}");
+    assert!(ended.body.contains("POST /auth/logout-all"), "{ended:?}");
+    assert!(
+        !ended.body.contains("for that token"),
+        "no token was sent: {ended:?}"
+    );
+    let own = get("/auth/session");
+    assert!(
+        own.body.contains("\"laptop\""),
+        "still signed in: {}",
+        own.body
+    );
+}
+
+/// Issue `verb` on `iri` with `args` at the hub, under the root capability: what a worker and its
+/// dispatcher would send, seeded where no browser door may write.
+fn as_root(server: &Server, verb: ikigai_core::Verb, iri: &str, args: &[(&str, &str)]) -> String {
+    let mut request = ikigai_core::Request::new(verb, ikigai_core::Iri::parse(iri).unwrap());
+    for (name, value) in args {
+        request = request.with_arg(
+            *name,
+            ikigai_core::ArgRef::Inline(value.as_bytes().to_vec()),
+        );
+    }
+    let answer = futures::executor::block_on(ikigai_core::Kernel::issue(
+        &server.hub,
+        request,
+        &ikigai_core::Capability::root(),
+    ))
+    .unwrap_or_else(|e| panic!("{iri}: {e}"));
+    String::from_utf8(answer.bytes).unwrap()
+}
+
+/// Claim item `id`, hand it back, and record `summary` on that hand-back.
+fn handed_back_with(server: &Server, id: &str, summary: &str) {
+    use ikigai_core::Verb;
+    as_root(
+        server,
+        Verb::Sink,
+        "urn:iki:ledger:claim",
+        &[("item", id), ("content", "w1"), ("lease", "1h")],
+    );
+    as_root(
+        server,
+        Verb::Sink,
+        "urn:iki:ledger:comment",
+        &[("item", id), ("content", "done"), ("handback", "true")],
+    );
+    as_root(
+        server,
+        Verb::Sink,
+        &format!("urn:iki:ledger:default:item:{id}:sessions"),
+        &[("content", summary)],
+    );
+}
+
+/// The Agent sessions panel of an item page, or `None` when it has none.
+fn sessions_panel(html: &str) -> Option<&str> {
+    let panel = html.split("id='sessions-title'").nth(1)?;
+    Some(&panel[..panel.find("</section>").expect("a closed section")])
+}
+
+/// ★ Ledger #3024: an item page lists the item's agent sessions, raw, newest first, as the
+/// ledger's `item:{id}:sessions` face holds them, in a captioned table with column and row
+/// headers. A field the harness did not report reads "not reported", never 0; nothing is
+/// totaled or priced; an item with no summary has no panel; and a viewer whose grant does not
+/// reach the session graph reads the ledger's refusal as a sentence, not a table.
+#[test]
+fn an_item_page_lists_its_agent_sessions_raw_and_newest_first() {
+    let server = Server::start();
+    let (_, id) = file(&server, "Worked by two agents");
+    let (_, untouched) = file(&server, "Never worked");
+    handed_back_with(
+        &server,
+        &id,
+        r#"{"session": "older-run", "machineName": "lawnboy", "harness": "claude",
+            "model": "claude-opus-5-5", "exitStatus": 0, "wallClockMs": 1830000,
+            "turns": 41, "toolCalls": 118, "inputTokens": 5120, "cachedInputTokens": 880000,
+            "cacheCreationTokens": 64000, "outputTokens": 21000}"#,
+    );
+    std::thread::sleep(Duration::from_millis(20));
+    handed_back_with(
+        &server,
+        &id,
+        r#"{"session": "newer-run", "machineName": "dogcow", "harness": "codex",
+            "model": "gpt-x", "exitStatus": 1, "wallClockMs": 850}"#,
+    );
+
+    for suffix in ["", "/card"] {
+        let page = server.page(&format!("/l/default/item/{id}{suffix}"), None);
+        assert_eq!(page.status, 200, "{page:?}");
+        let panel = sessions_panel(&page.body).unwrap_or_else(|| panic!("no panel: {page:?}"));
+        assert!(panel.contains(">Agent sessions</h2>"), "{panel}");
+        assert!(panel.contains("2 sessions, newest first"), "{panel}");
+        assert!(
+            panel.contains("tabindex='0'"),
+            "a scrolling table is a stop: {panel}"
+        );
+        assert!(
+            panel.contains(
+                "<caption id='sessions-table-title'>Agent sessions on this item, one row each, newest first</caption>"
+            ),
+            "{panel}"
+        );
+        for column in [
+            "Session",
+            "Recorded",
+            "Machine",
+            "Harness",
+            "Model",
+            "Exit status",
+            "Wall-clock time",
+            "Turns",
+            "Input tokens",
+            "Cached input tokens",
+            "Cache creation tokens",
+            "Output tokens",
+        ] {
+            assert!(
+                panel.contains(&format!("<th scope='col'>{column}</th>")),
+                "{column}: {panel}"
+            );
+        }
+        let newer = panel
+            .find("<th scope='row'><code>newer-run</code></th>")
+            .unwrap_or_else(|| panic!("no newer row: {panel}"));
+        let older = panel
+            .find("<th scope='row'><code>older-run</code></th>")
+            .unwrap_or_else(|| panic!("no older row: {panel}"));
+        assert!(newer < older, "newest first: {panel}");
+        let (newer_row, older_row) = (&panel[newer..older], &panel[older..]);
+        for said in [
+            "lawnboy",
+            "claude",
+            "claude-opus-5-5",
+            "30 min 30 s",
+            "41",
+            "5,120",
+            "880,000",
+            "64,000",
+            "21,000",
+        ] {
+            assert!(
+                older_row.contains(&format!(">{said}</td>")),
+                "{said}: {older_row}"
+            );
+        }
+        assert!(older_row.contains("<time datetime='"), "{older_row}");
+        for said in ["dogcow", "codex", "gpt-x", "850 ms"] {
+            assert!(
+                newer_row.contains(&format!(">{said}</td>")),
+                "{said}: {newer_row}"
+            );
+        }
+        // Turns and the four token counts were not reported: words, never a zero.
+        assert_eq!(
+            newer_row.matches(">not reported</td>").count(),
+            5,
+            "{newer_row}"
+        );
+        assert!(!newer_row.contains(">0</td>"), "{newer_row}");
+        // Raw: no totals, no prices.
+        for absent in ["Total", "total", "$", "cost", "Cost", "price"] {
+            assert!(!panel.contains(absent), "{absent}: {panel}");
+        }
+    }
+
+    // An item with no summary has no panel at all.
+    let page = server.page(&format!("/l/default/item/{untouched}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    assert!(sessions_panel(&page.body).is_none(), "{page:?}");
+
+    // A grant from before the session graph (ledger #3661) reads the item, and the ledger's
+    // refusal of its sessions as a sentence, with no table.
+    let narrow = Server::start_configured(
+        ikigai_gonk::rules::DEFAULT_RULES,
+        vec![
+            "urn:cap:ledger:read:default".to_string(),
+            "urn:cap:store:read:graph:urn:iki:ledger:graph:default".to_string(),
+        ],
+    );
+    let (_, id) = first_item(&as_root(
+        &narrow,
+        ikigai_core::Verb::Sink,
+        "urn:iki:ledger:default:append",
+        &[("content", "Worked once")],
+    ));
+    handed_back_with(
+        &narrow,
+        &id,
+        r#"{"session": "a-run", "machineName": "m", "harness": "claude",
+            "model": "claude-opus-5-5", "exitStatus": 0, "wallClockMs": 1000}"#,
+    );
+    let page = narrow.page(&format!("/l/default/item/{id}"), None);
+    assert_eq!(page.status, 200, "{page:?}");
+    let panel = sessions_panel(&page.body).unwrap_or_else(|| panic!("no panel: {page:?}"));
+    assert!(
+        panel.contains("agent sessions: this capability does not hold `urn:cap:store:read:graph:urn:iki:ledger:graph:default:session`"),
+        "{panel}"
+    );
+    assert!(!panel.contains("<table"), "{panel}");
+    assert!(!panel.contains("a-run"), "{panel}");
+}

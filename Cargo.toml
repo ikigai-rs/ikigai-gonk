@@ -220,7 +220,13 @@ ikigai-vocab = "0.4.2"
 # 0.5.0: Per-graph freshness and `store-graph-written` (ledger #3375). `"0.5.0"` is `<0.6.0`.
 # ★ 0.6.0 (ledger #4069, the core 0.4.0 cascade): the first release on ikigai-core 0.4, so the graph
 # links ONE core. `"0.6.0"` is `<0.7.0`.
-ikigai-store = { version = "0.6.2", features = ["persistent", "text-index"] }
+# ★ 0.6.4 is the floor now, a BEHAVIOR one (ledger #4448): through 0.6.3 a graph's first text
+# index build overlapping writes could settle one document high, so ikigai-ledger's `complete`
+# check (`documents:` equal to the enrolled literals) refused `sort=relevance` until a restart,
+# and `tests/text_index_4130.rs` flaked (ledger #4438). 0.6.4 bumps the index format to 3, so
+# every enrolled index rebuilds once on the first start (see the CHANGELOG). ikigai-ledger
+# 0.26.1's own `"0.6.1"` admits it. `"0.6.4"` is `<0.7.0`.
+ikigai-store = { version = "0.6.4", features = ["persistent", "text-index"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied
@@ -361,7 +367,15 @@ ikigai-log = "0.13.0"
 # ^0.2, so the graph links ONE core. `"0.4.0"` is `<0.5.0`.
 # ★ 0.6.0 (ledger #4069, the core 0.4.0 cascade): the first release on ikigai-core 0.4, so the graph
 # links ONE core. `"0.6.0"` is `<0.7.0`.
-ikigai-script = "0.6.0"
+# ★ 0.6.1 is the floor now, a SECURITY one, the read-grant fix (ledger #4456, #4007;
+# ikigai-script PR 48): `…:compiled` carries the program, so it answers only a holder of the
+# script's READ grant (0.6.0 answered a holder of the run grant alone), and the compiled form
+# and a run record name only the publisher's exclusions about the script's own grants.
+# `tests/script_compiled_4456.rs` is the FLOOR TEST: red on 0.6.0. Nothing persisted changes
+# (the script atoms and run records are stored as 0.6.0 stored them; the narrowing is applied
+# when a record is answered, to records an older release wrote too), and gonk calls no new API,
+# so it needed no code change. `"0.6.1"` is `<0.7.0`, the line `ikigai-nl` 0.7.0 is on.
+ikigai-script = "0.6.1"
 # ★ The rate on ANONYMOUS script runs (ledger #1175, `crate::script::ANONYMOUS_RUNS`): one
 # `RateLimit` overlay over the script family, consulted only for a run whose capability carries
 # the anonymous door's marker, which is the advice `ikigai-script`'s README gives a host that
