@@ -545,7 +545,8 @@ serve flags (each overrides its config key wholesale):
 
 files (in the config home, ~/.config/ikigai unless XDG_CONFIG_HOME or --config-home says
 otherwise):
-  config.toml               the gonk.* keys above
+  config.toml               the gonk.* keys above, and a [secret] section naming where
+                            gonk keeps its secrets (ikigai-secret's stores and routes)
   store.toml, gonk.store.toml   where the dataset lives (default ~/.ikigai/store)
   gonk/clients.json         identity -> grant name: certificates under `clients` (the QUIC door
                             opens when one is enrolled), passkeys under `passkeys` (HTTP only)
