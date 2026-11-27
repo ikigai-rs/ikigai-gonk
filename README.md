@@ -355,7 +355,8 @@ the passkey was created with until it is re-created.
   `--credential <id>`) ends every session of one passkey and leaves it enrolled: it appends a
   `gonk:PasskeySessionsEnded` line to `gonk/passkeys.log`, and the server ends the sessions at
   its next signed-in request or sign-in, with no restart. A signed-in page can do the same for
-  its own passkey with `POST /auth/logout-all` and its session token as the body.
+  its own person with `POST /auth/logout-all` and no body (its cookie names the session); a
+  caller that holds a session token may send it as the body instead.
 - **Sign-ins and sign-outs are logged** (ledger #1824), in the log segment beside the door
   lines (ledger #383), whatever `gonk.log.access` says: `urn:iki:gonk:class:Login` or
   `…:Logout`, the passkey resource, then `door`, `outcome`, `principal` (the passkey's person
@@ -404,12 +405,14 @@ the passkey was created with until it is re-created.
 - **Verification** is `ikigai-passkey`'s: ES256, the exact origin `http://localhost:<port>`,
   RP ID `localhost`, a single-use challenge, user verification required, and a signature
   counter that must not go backwards.
-- ⚠ **The session cookie is set by the page's script, so it is not `HttpOnly`** (ledger
-  #1591). The HTTP transport this release builds on (ikigai-web 0.1.63) builds every response
-  from a resource representation and cannot add `Set-Cookie`; the seam that can
-  (`ikigai_web::with_headers`) is not in a published ikigai-web yet.
-  What remains is `SameSite=Strict`, a same-origin Content-Security-Policy with no inline
-  script or style, and a session table that lives in memory.
+- **The session token travels only in an `HttpOnly` cookie** (ledger #1591, #4542). The
+  server sets it (`HttpOnly; SameSite=Strict`, and `Secure` on the public origin) when
+  `/auth/login`, `/auth/add-grant` or `/auth/reassert` opens a session. Their JSON answers name
+  the session by `sessionId`, the token's SHA-256, and never carry the token itself, so no
+  script on the page, and nothing that logs response bodies, sees a bearer credential. The page
+  names no token: the server reads the session from the cookie. A caller that holds a token
+  some other way may still send it as the body of `session`, `logout` and `logout-all`, or as
+  the `session` field of `add-grant-options`, `add-grant` and `reassert`.
 
 ### The headers every page carries
 

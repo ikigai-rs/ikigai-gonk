@@ -192,14 +192,14 @@ impl Gonk {
             "/auth/register",
             &authenticator.register_body(&c, &invite, &self.origin()),
         );
+        // The token rides in the HttpOnly cookie only, never the body (ledger #4542).
         let c = challenge("login-options");
-        json(
+        common::post_page(
+            self.addr,
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
-        )["session"]
-            .as_str()
-            .unwrap()
-            .to_string()
+        )
+        .session()
     }
 
     fn origin(&self) -> String {

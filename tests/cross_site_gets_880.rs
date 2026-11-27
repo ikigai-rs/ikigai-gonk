@@ -391,14 +391,14 @@ impl Gonk {
             &authenticator.register_body(&c, &invite, &self.origin()),
         );
         assert_eq!(status, 200, "{body}");
+        // The token rides in the HttpOnly cookie only, never the body (ledger #4542).
         let c = self.challenge("login-options");
-        let (status, body) = self.post_json(
+        common::post_page(
+            self.addr,
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
-        );
-        assert_eq!(status, 200, "{body}");
-        let v: serde_json::Value = serde_json::from_str(&body).expect("a session");
-        v["session"].as_str().expect("session").to_string()
+        )
+        .session()
     }
 
     fn calls(&self) -> usize {

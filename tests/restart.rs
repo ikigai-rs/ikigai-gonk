@@ -340,13 +340,13 @@ fn a_passkey_enrolled_over_http_survives_a_restart() {
 
     // And the passkey still signs in, at the new port's origin.
     let c = second.challenge("login-options");
-    let (status, body) = second.json(
+    let token = common::post_page(
+        ([127, 0, 0, 1], second.port).into(),
         "/auth/login",
         &Authenticator::new().login_body(&c, &second.origin(), 1),
-    );
-    assert_eq!(status, 200, "{body}");
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let (status, who) = second.json("/auth/session", v["session"].as_str().unwrap());
+    )
+    .session();
+    let (status, who) = second.json("/auth/session", &token);
     assert_eq!(status, 200, "{who}");
     assert!(who.contains("\"grant\":\"brian\""), "{who}");
 }

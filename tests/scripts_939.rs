@@ -534,13 +534,13 @@ impl Gonk {
         );
         assert_eq!(status, 200, "{body}");
         let c = challenge("login-options");
-        let (status, body) = self.json(
+        let answer = common::post_page(
+            self.http,
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
         );
-        assert_eq!(status, 200, "{body}");
-        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-        v["session"].as_str().unwrap().to_string()
+        assert_eq!(answer.status, 200, "{answer:?}");
+        answer.session()
     }
 
     /// The mechanical route over HTTP: `method path`, `body` as the content, signed in when

@@ -355,7 +355,8 @@ fn a_phone_passkey_joins_the_person_at_the_public_relying_party() {
         .find(|l| l.to_ascii_lowercase().starts_with("set-cookie:"))
         .expect("a session cookie");
     assert!(cookie.contains("; Secure"), "{cookie}");
-    let token = json(&got)["session"].as_str().unwrap().to_string();
+    let token = common::session_cookie(&got.head).expect("the token rides in the cookie");
+    assert!(json(&got).get("session").is_none(), "{got:?}");
     // …and its session holds the person's grants there.
     let got = server.get(
         server.public,

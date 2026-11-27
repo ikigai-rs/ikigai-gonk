@@ -115,14 +115,13 @@ fn sign_in(gonk: &Gonk) -> String {
     );
     assert_eq!(status, 200, "{body}");
     let c = challenge("login-options");
-    let (status, body) = json(
-        gonk,
+    let answer = common::post_page(
+        gonk.http,
         "/auth/login",
         &authenticator.login_body(&c, &origin(gonk), 1),
     );
-    assert_eq!(status, 200, "{body}");
-    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    v["session"].as_str().unwrap().to_string()
+    assert_eq!(answer.status, 200, "{answer:?}");
+    answer.session()
 }
 
 fn request(verb: Verb, iri: &str, args: &[(&str, &str)]) -> Request {
