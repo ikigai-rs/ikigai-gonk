@@ -1719,6 +1719,9 @@ pub enum Purpose {
     /// ([`Passkeys::reassert`], ledger #3816): no other ceremony's challenge can be spent on it,
     /// nor it on another.
     Reassert,
+    /// A proof-of-possession nonce ([`Passkeys::proof_nonce`], ledger #4543): spent by one
+    /// signed write, never by a ceremony.
+    Proof,
 }
 
 impl Purpose {
@@ -1729,6 +1732,7 @@ impl Purpose {
             Purpose::Login => b'l',
             Purpose::AddGrant => b'g',
             Purpose::Reassert => b'a',
+            Purpose::Proof => b'p',
         }
     }
 }
@@ -1753,14 +1757,84 @@ struct Session {
     /// The `last_seen` the file holds: a request writes the file only once this is
     /// [`SEEN_WRITE_SECONDS`] behind, so a polling page does not write it every few seconds.
     stored_seen: u64,
+    /// The public half of the browser's NON-extractable WebCrypto ECDSA P-256 key the page made
+    /// at the sign-in (ledger #4543), as its SEC1 point, base64url. Every write this session
+    /// makes is signed by it ([`Passkeys::proven`]). `None` for a session an older gonk wrote:
+    /// it reads, and writes nothing until the passkey re-asserts and binds a key.
+    proof_key: Option<String>,
 }
 
 /// How stale the file's `last_seen` may be before a request writes it again. A restart can
 /// only make the idle bound end a session this much SOONER, never later.
 const SEEN_WRITE_SECONDS: u64 = 60;
 
-/// The `gonk/sessions.json` format version this server writes and reads.
-const SESSIONS_FORMAT: u64 = 1;
+/// The `gonk/sessions.json` format version this server writes and reads. Format 2 (ledger
+/// #4543) adds `proof_key` to a session; a format-1 file is read, backed up to
+/// [`sessions_backup`] once, and rewritten as format 2, its sessions keyless.
+const SESSIONS_FORMAT: u64 = 2;
+
+/// The format-1 `gonk/sessions.json` shape older gonks wrote (and, before #3388, with `grant`).
+const OLDER_SESSIONS_FORMAT: u64 = 1;
+
+/// Where the migration keeps the format-1 `gonk/sessions.json` it replaced.
+pub fn sessions_backup(layout: &Layout) -> std::path::PathBuf {
+    let path = layout.sessions_json();
+    path.with_file_name("sessions.json.format-1.bak")
+}
+
+/// How far a proof's timestamp may be from the server's clock, either way, in seconds.
+pub const PROOF_SKEW_SECONDS: u64 = 120;
+
+/// The request header a page's signed write carries: `<unix seconds>.<nonce>.<signature>`,
+/// the signature base64url of the 64-byte IEEE P1363 `r‖s` WebCrypto makes, over
+/// [`proof_message`].
+pub const PROOF_HEADER: &str = "gonk-proof";
+
+/// What a proof signs: the method, the request path (as sent, up to any `?`), the
+/// timestamp and the door-issued nonce, one per line after a fixed tag.
+///
+/// ```
+/// use ikigai_gonk::identity::proof_message;
+/// assert_eq!(proof_message("POST", "/k", 7, "n"), "gonk-proof-1\nPOST\n/k\n7\nn");
+/// ```
+pub fn proof_message(method: &str, target: &str, timestamp: u64, nonce: &str) -> String {
+    format!("gonk-proof-1\n{method}\n{target}\n{timestamp}\n{nonce}")
+}
+
+/// The `proofKey` a sign-in body carries, checked to be a P-256 SEC1 point (base64url), or
+/// `None` when the body has none (an older page, a socket caller).
+fn proof_key_of(v: &Value) -> Result<Option<String>, String> {
+    match v.get("proofKey") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => {
+            let bytes = URL_SAFE_NO_PAD
+                .decode(text.trim())
+                .map_err(|_| "`proofKey` is not base64url".to_string())?;
+            p256::ecdsa::VerifyingKey::from_sec1_bytes(&bytes)
+                .map_err(|_| "`proofKey` is not a P-256 public key".to_string())?;
+            Ok(Some(URL_SAFE_NO_PAD.encode(&bytes)))
+        }
+        Some(_) => Err("`proofKey` is not a string".to_string()),
+    }
+}
+
+/// Whether `signature` (base64url P1363) by the SEC1 key `key` (base64url) signs `message`.
+fn proof_verifies(key: &str, message: &str, signature: &str) -> bool {
+    use p256::ecdsa::signature::Verifier;
+    let (Ok(key), Ok(sig)) = (
+        URL_SAFE_NO_PAD.decode(key),
+        URL_SAFE_NO_PAD.decode(signature),
+    ) else {
+        return false;
+    };
+    let (Ok(key), Ok(sig)) = (
+        p256::ecdsa::VerifyingKey::from_sec1_bytes(&key),
+        p256::ecdsa::Signature::from_slice(&sig),
+    ) else {
+        return false;
+    };
+    key.verify(message.as_bytes(), &sig).is_ok()
+}
 
 impl Session {
     /// Why this session is over at `now`, or `None` while it is live.
@@ -1815,6 +1889,7 @@ impl State {
                         "issued": s.issued,
                         "last_seen": s.last_seen,
                         "expires": s.expires,
+                        "proof_key": s.proof_key,
                     }),
                 )
             })
@@ -1853,16 +1928,40 @@ fn load_sessions(layout: &Layout, now: u64) -> Option<(HashMap<String, Session>,
             return None;
         }
     };
-    if doc.get("format").and_then(Value::as_u64) != Some(SESSIONS_FORMAT) {
+    let format = doc.get("format").and_then(Value::as_u64);
+    if format != Some(SESSIONS_FORMAT) && format != Some(OLDER_SESSIONS_FORMAT) {
         eprintln!(
             "ikigai-gonk: {} is not format {SESSIONS_FORMAT}; no session restored",
             path.display()
         );
         return None;
     }
+    // ★ Ledger #4543: a file an older gonk wrote has no `proof_key`. It is kept as it was
+    // (once: a backup already there is an earlier run's and stays), and the caller rewrites it
+    // as format 2, atomically ([`quic::write_private`]); its sessions read and write nothing
+    // until their passkey re-asserts. A format-2 file is never backed up again: idempotent.
+    let older = format == Some(OLDER_SESSIONS_FORMAT);
+    if older {
+        let backup = sessions_backup(layout);
+        let kept = backup.exists() || quic::write_private(&backup, &text).is_ok();
+        if !kept {
+            eprintln!(
+                "ikigai-gonk: {} could not be backed up to {}; no session restored",
+                path.display(),
+                backup.display()
+            );
+            return None;
+        }
+        eprintln!(
+            "ikigai-gonk: {} migrated to format {SESSIONS_FORMAT} (backup {}): its sessions \
+             read, and write again once their passkey re-asserts",
+            path.display(),
+            backup.display()
+        );
+    }
     let log_seen = doc.get("log_seen").and_then(Value::as_u64).unwrap_or(0);
     let mut sessions = HashMap::new();
-    let mut dropped = false;
+    let mut dropped = older;
     for (hash, entry) in doc
         .get("sessions")
         .and_then(Value::as_object)
@@ -1910,6 +2009,16 @@ fn load_sessions(layout: &Layout, now: u64) -> Option<(HashMap<String, Session>,
                         expires,
                         last_seen,
                         stored_seen: last_seen,
+                        // A key that is not a P-256 point binds nothing: the session reads.
+                        proof_key: entry
+                            .get("proof_key")
+                            .and_then(Value::as_str)
+                            .filter(|key| {
+                                URL_SAFE_NO_PAD.decode(key).ok().is_some_and(|bytes| {
+                                    p256::ecdsa::VerifyingKey::from_sec1_bytes(&bytes).is_ok()
+                                })
+                            })
+                            .map(str::to_string),
                     },
                 );
             }
@@ -2546,6 +2655,7 @@ impl Passkeys {
 
     fn sign_in(&self, site: &Site, body: &[u8], now: u64) -> Result<(String, Identity), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
+        let proof_key = proof_key_of(&v)?;
         let verified = self.verify_assertion(site, &v, Purpose::Login, now)?;
         // Answered only now that a passkey signed it ([`MAX_PENDING`]).
         self.answer_challenge(&verified.challenge, verified.expires, now)?;
@@ -2564,7 +2674,7 @@ impl Passkeys {
             write_passkey(&self.layout, &lock, &enrolled)?;
         }
         drop(lock);
-        self.open_session(enrolled, "login", now)
+        self.open_session(enrolled, "login", proof_key, now)
     }
 
     /// Check a `navigator.credentials.get` answer in `v` (`{challenge, id, authenticatorData,
@@ -2635,6 +2745,7 @@ impl Passkeys {
         &self,
         enrolled: Enrolled,
         op: &'static str,
+        proof_key: Option<String>,
         now: u64,
     ) -> Result<(String, Identity), String> {
         let scopes = scopes_of_all(&self.layout, &enrolled.grants)?;
@@ -2683,6 +2794,7 @@ impl Passkeys {
                 expires,
                 last_seen: now,
                 stored_seen: now,
+                proof_key,
             },
         );
         state.dirty = true;
@@ -2922,7 +3034,10 @@ impl Passkeys {
             ));
         }
         drop(lock);
-        let (token, identity) = self.open_session(current, "add-grant", now)?;
+        let proof_key = serde_json::from_slice::<Value>(body)
+            .map_err(|e| format!("not JSON: {e}"))
+            .and_then(|v| proof_key_of(&v))?;
+        let (token, identity) = self.open_session(current, "add-grant", proof_key, now)?;
         Ok((token, identity, redeemed))
     }
 
@@ -3064,6 +3179,7 @@ impl Passkeys {
     ) -> Result<(String, Identity), String> {
         let v: Value = serde_json::from_slice(body).map_err(|e| format!("not JSON: {e}"))?;
         let field = |name: &str| v.get(name).and_then(Value::as_str);
+        let proof_key = proof_key_of(&v)?;
         let key = self.reassert_target(field("session"), field("sessionId"), door)?;
         let who = self
             .identity_at(key.clone(), now)
@@ -3112,7 +3228,7 @@ impl Passkeys {
                 why: Some("reasserted"),
             },
         );
-        self.open_session(enrolled, "reassert", now)
+        self.open_session(enrolled, "reassert", proof_key, now)
     }
 
     /// End a session. Unknown tokens are not an error: signing out twice is still signed out.
@@ -3253,6 +3369,66 @@ impl Passkeys {
             },
         );
         ended
+    }
+
+    /// A fresh nonce for one signed write (ledger #4543): sealed here like a challenge, good
+    /// for [`CHALLENGE_SECONDS`], spent by the first write it proves.
+    pub fn proof_nonce(&self, now: u64) -> Result<String, String> {
+        self.challenge(Purpose::Proof, now)
+    }
+
+    /// Whether `proof` (the [`PROOF_HEADER`] value) proves that the browser holding the session
+    /// `token` made THIS request, `method` to `target`, at `now`: signed by the key the session
+    /// bound at its sign-in, over a timestamp within [`PROOF_SKEW_SECONDS`] and a nonce issued
+    /// here, not yet spent. A proof that verifies spends its nonce, so a replay is refused.
+    /// `false` for a session with no key (an older gonk's), no proof, or any other key's.
+    pub fn proven(
+        &self,
+        token: &str,
+        method: &str,
+        target: &str,
+        proof: Option<&str>,
+        now: u64,
+    ) -> bool {
+        let Some(proof) = proof else {
+            return false;
+        };
+        let mut parts = proof.trim().splitn(3, '.');
+        let (Some(timestamp), Some(nonce), Some(signature)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            return false;
+        };
+        let Ok(timestamp) = timestamp.parse::<u64>() else {
+            return false;
+        };
+        if timestamp.abs_diff(now) > PROOF_SKEW_SECONDS {
+            return false;
+        }
+        let Some(key) = self.state.lock().ok().and_then(|state| {
+            state
+                .sessions
+                .get(&sha256_hex(token.as_bytes()))
+                .and_then(|s| s.proof_key.clone())
+        }) else {
+            return false;
+        };
+        let Ok(expires) = self.check_challenge(nonce, Purpose::Proof, now) else {
+            return false;
+        };
+        let message = proof_message(&method.to_ascii_uppercase(), target, timestamp, nonce);
+        proof_verifies(&key, &message, signature)
+            && self.answer_challenge(nonce, expires, now).is_ok()
+    }
+
+    /// Whether the session `token` names has bound a proof key (ledger #4543).
+    pub fn bound(&self, token: &str) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state
+                .sessions
+                .get(&sha256_hex(token.as_bytes()))
+                .is_some_and(|s| s.proof_key.is_some())
+        })
     }
 
     fn identity_at(&self, key: String, now: u64) -> Option<Identity> {
@@ -3733,6 +3909,7 @@ mod tests {
                 expires: now + rp.lifetime(&scopes),
                 last_seen: now,
                 stored_seen: now,
+                proof_key: None,
             },
         );
         state.dirty = true;
@@ -3825,7 +4002,7 @@ mod tests {
                 .and_then(|mut p| p.remove("cmVhZGVy"));
             match reader {
                 Some(reader) => {
-                    rp.open_session(reader, "login", 1_000).unwrap();
+                    rp.open_session(reader, "login", None, 1_000).unwrap();
                 }
                 None => {
                     session_as(&rp, "cmVhZGVy", "reader", Authority::Read, 1_000);
@@ -3837,7 +4014,7 @@ mod tests {
             .unwrap()
             .remove("b3duZXI")
             .unwrap();
-        let opened = rp.open_session(owner, "login", 1_010);
+        let opened = rp.open_session(owner, "login", None, 1_010);
         assert!(
             opened.is_ok(),
             "the owner cannot sign in: {}",
@@ -3860,14 +4037,14 @@ mod tests {
         let mut tokens = vec![first];
         for n in 1..MAX_SESSIONS_PER_PASSKEY as u64 {
             tokens.push(
-                rp.open_session(reader.clone(), "login", 1_000 + n)
+                rp.open_session(reader.clone(), "login", None, 1_000 + n)
                     .unwrap()
                     .0,
             );
         }
         let now = 1_000 + MAX_SESSIONS_PER_PASSKEY as u64;
         assert!(tokens.iter().all(|t| rp.identity(t, now).is_some()));
-        let (newest, _) = rp.open_session(reader, "login", now).unwrap();
+        let (newest, _) = rp.open_session(reader, "login", None, now).unwrap();
         assert!(rp.identity(&tokens[0], now).is_none(), "the oldest ended");
         assert!(tokens[1..].iter().all(|t| rp.identity(t, now).is_some()));
         assert!(
@@ -3904,7 +4081,7 @@ mod tests {
         let mut idle = Vec::new();
         for n in 1..MAX_SESSIONS_PER_PASSKEY as u64 {
             idle.push(
-                rp.open_session(reader.clone(), "login", 1_000 + n)
+                rp.open_session(reader.clone(), "login", None, 1_000 + n)
                     .unwrap()
                     .0,
             );
@@ -3912,7 +4089,7 @@ mod tests {
         // The first sign-in is used again; none of the later ones is.
         let now = 1_100;
         assert!(rp.identity(&daily, now).is_some());
-        let (newest, _) = rp.open_session(reader, "login", now + 1).unwrap();
+        let (newest, _) = rp.open_session(reader, "login", None, now + 1).unwrap();
         assert!(
             rp.identity(&daily, now + 1).is_some(),
             "the session signed in first but used just now stays"

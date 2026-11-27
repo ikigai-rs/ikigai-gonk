@@ -5613,7 +5613,14 @@ impl Endpoint for PasskeyDoor {
                 "" => self.passkeys.signed_in(door, now),
                 token => self.passkeys.identity(token, now),
             } {
-                Some(who) => Ok(json_repr(session_answer(&who, now))),
+                Some(who) => {
+                    let mut answer = session_answer(&who, now);
+                    // ★ Ledger #4543: the nonce the page's next write signs, spent by that write.
+                    if let Ok(nonce) = self.passkeys.proof_nonce(now) {
+                        answer["proofNonce"] = Value::String(nonce);
+                    }
+                    Ok(json_repr(answer))
+                }
                 None if content.trim().is_empty() => Err(no_session("GET /auth/session")),
                 None => Err(Error::NotFound(
                     "no live session for that token".to_string(),

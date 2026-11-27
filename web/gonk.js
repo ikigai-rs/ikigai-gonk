@@ -127,6 +127,64 @@
     e.detail.path = "/k?c=" + encodeURIComponent(path.slice(3));
   });
 
+  // ------------------------------------------- proof of possession (ledger #4543)
+  //
+  // The cookie alone only READS. At each sign-in the page makes a NON-extractable ECDSA P-256 key,
+  // keeps it in IndexedDB (a CryptoKey is stored as itself: its private half never leaves the
+  // browser) and sends the public half as `proofKey`. Every htmx write then carries a
+  // `Gonk-Proof` header: a signature over the method, the path, the time and a nonce the server
+  // issued in /auth/session, spent by that one write.
+  const PROOF_DB = "gonk-proof";
+  function proofStore(mode, act) {
+    return new Promise((resolve, reject) => {
+      const open = indexedDB.open(PROOF_DB, 1);
+      open.onupgradeneeded = () => open.result.createObjectStore("keys");
+      open.onerror = () => reject(open.error);
+      open.onsuccess = () => {
+        const tx = open.result.transaction("keys", mode);
+        const req = act(tx.objectStore("keys"));
+        tx.oncomplete = () => resolve(req && req.result);
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+  }
+  async function newProofKey() {
+    const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign"]);
+    await proofStore("readwrite", (keys) => keys.put(pair.privateKey, "session"));
+    return toB64(await crypto.subtle.exportKey("raw", pair.publicKey));
+  }
+  async function proofHeader(method, path) {
+    const key = await proofStore("readonly", (keys) => keys.get("session"));
+    if (!key) return null;
+    const res = await fetch("/auth/session", { cache: "no-store", credentials: "same-origin", headers: { Accept: "application/json" } });
+    if (!res.ok) return null;
+    const nonce = (await res.json()).proofNonce;
+    if (!nonce) return null;
+    const time = Math.floor(Date.now() / 1000);
+    const message = "gonk-proof-1\n" + method.toUpperCase() + "\n" + path + "\n" + time + "\n" + nonce;
+    const sig = await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, key, new TextEncoder().encode(message));
+    return time + "." + nonce + "." + toB64(sig);
+  }
+  const proofs = new WeakMap();
+  document.addEventListener("htmx:confirm", (e) => {
+    const verb = (e.detail && e.detail.verb || "get").toUpperCase();
+    if (verb === "GET" || verb === "HEAD" || proofs.has(e.target)) return;
+    e.preventDefault();
+    const path = new URL(e.detail.path, location.href).pathname.replace(/^\/k\/.*/, "/k");
+    proofHeader(verb, path)
+      .catch(() => null)
+      .then((proof) => {
+        proofs.set(e.target, proof);
+        e.detail.issueRequest(true);
+      });
+  });
+  document.addEventListener("htmx:configRequest", (e) => {
+    if (!proofs.has(e.detail.elt)) return;
+    const proof = proofs.get(e.detail.elt);
+    proofs.delete(e.detail.elt);
+    if (proof) e.detail.headers["Gonk-Proof"] = proof;
+  });
+
   // ------------------------------------------- a search for an item number (ledger #4051)
   //
   // The ledger page's search swaps the list with htmx. A search that is exactly N or #N is a
@@ -1272,6 +1330,7 @@
       });
       const r = cred.response;
       const done = await post("/auth/login", {
+        proofKey: await newProofKey(),
         challenge,
         id: cred.id,
         authenticatorData: toB64(r.authenticatorData),
@@ -1394,6 +1453,7 @@
       });
       const r = cred.response;
       const done = await post("/auth/add-grant", {
+        proofKey: await newProofKey(),
         invite,
         challenge,
         id: cred.id,

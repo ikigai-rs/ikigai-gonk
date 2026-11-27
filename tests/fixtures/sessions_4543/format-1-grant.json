@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "log_seen": 0,
+  "sessions": {
+    "HASH": {
+      "principal": "PRINCIPAL",
+      "grant": "writer",
+      "issued": "ISSUED",
+      "last_seen": "ISSUED",
+      "expires": "EXPIRES"
+    }
+  }
+}

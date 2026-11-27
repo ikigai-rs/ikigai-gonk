@@ -715,7 +715,7 @@ pub struct HttpDoor {
 pub fn http_cap(door: HttpDoor) -> CapFn {
     Arc::new(move |request: &HttpRequest| {
         let now = identity::now_seconds();
-        let identity = http_identity(&door, request, now);
+        let identity = proof_gated(&door, request, http_identity(&door, request, now), now);
         let capability = Capability::scoped(http_scopes_for(&door, request, identity.as_ref()));
         match identity.map(|who| who.enrolled.person) {
             // A person IRI is always an absolute IRI with no `*`, so this cannot fail; if it
@@ -757,6 +757,45 @@ pub fn http_principal(door: HttpDoor) -> PrincipalFn {
 pub fn http_principal_of(door: &HttpDoor, request: &HttpRequest, now: u64) -> Option<String> {
     let identity = http_identity(door, request, now)?;
     Some(identity.enrolled.person)
+}
+
+/// ★ **A cookie alone only reads** (ledger #4543). A request that may change state — any
+/// method but `GET` and `HEAD` — keeps its session's write scopes only when it carries a
+/// [`identity::PROOF_HEADER`] signed by the key the session bound at its sign-in, over this
+/// method and path (the request target up to any `?`), a fresh timestamp and an unspent door-issued nonce
+/// ([`identity::Passkeys::proven`]). Without one — no proof, a stale or replayed one, another
+/// key's, or a session an older gonk opened with no key — it keeps the READ half, exactly as
+/// past the write bound, so a write is refused and the name it carries still stands. Reads and
+/// navigations are unchanged: a stolen cookie value still reads, and writes nothing.
+///
+/// Spent here, in the capability, which the edge computes once per request; never in
+/// [`http_principal`], which only names who asked.
+fn proof_gated(
+    door: &HttpDoor,
+    request: &HttpRequest,
+    identity: Option<identity::Identity>,
+    now: u64,
+) -> Option<identity::Identity> {
+    let mut identity = identity?;
+    if matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "HEAD") {
+        return Some(identity);
+    }
+    let proven = match (door.passkeys.as_ref(), session_token(request)) {
+        (Some(passkeys), Some(token)) => passkeys.proven(
+            &token,
+            &request.method,
+            request.raw_target.split('?').next().unwrap_or_default(),
+            request.header(identity::PROOF_HEADER),
+            now,
+        ),
+        _ => false,
+    };
+    if !proven {
+        let (reads, writes) = identity::split_reads(&identity.scopes);
+        identity.scopes = reads;
+        identity.restore.extend(writes);
+    }
+    Some(identity)
 }
 
 fn http_identity(door: &HttpDoor, request: &HttpRequest, now: u64) -> Option<identity::Identity> {
@@ -1110,7 +1149,7 @@ pub fn http_scopes(door: &HttpDoor, request: &HttpRequest, now: u64) -> Vec<Stri
     if let Some(marker) = http_refusal(door, request) {
         return vec![marker.to_string()];
     }
-    let identity = http_identity(door, request, now);
+    let identity = proof_gated(door, request, http_identity(door, request, now), now);
     http_scopes_for(door, request, identity.as_ref())
 }
 
