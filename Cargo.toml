@@ -220,7 +220,13 @@ ikigai-vocab = "0.4.2"
 # 0.5.0: Per-graph freshness and `store-graph-written` (ledger #3375). `"0.5.0"` is `<0.6.0`.
 # ★ 0.6.0 (ledger #4069, the core 0.4.0 cascade): the first release on ikigai-core 0.4, so the graph
 # links ONE core. `"0.6.0"` is `<0.7.0`.
-ikigai-store = { version = "0.6.2", features = ["persistent", "text-index"] }
+# ★ 0.6.4 is the floor now, a BEHAVIOR one (ledger #4448): through 0.6.3 a graph's first text
+# index build overlapping writes could settle one document high, so ikigai-ledger's `complete`
+# check (`documents:` equal to the enrolled literals) refused `sort=relevance` until a restart,
+# and `tests/text_index_4130.rs` flaked (ledger #4438). 0.6.4 bumps the index format to 3, so
+# every enrolled index rebuilds once on the first start (see the CHANGELOG). ikigai-ledger
+# 0.26.1's own `"0.6.1"` admits it. `"0.6.4"` is `<0.7.0`.
+ikigai-store = { version = "0.6.4", features = ["persistent", "text-index"] }
 # Named ledgers over the store's narrow per-graph doors. 0.2.1 is the floor: through
 # 0.2.0 `item:{id}` declared the BROAD `urn:cap:store:read`, so a caller holding exactly
 # the per-ledger grant list this server hands out could list a ledger and was denied

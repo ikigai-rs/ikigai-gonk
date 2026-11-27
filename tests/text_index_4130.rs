@@ -13,6 +13,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ikigai_core::{Capability, Iri, Kernel, Request, Verb};
 use ikigai_gonk::grants::{grants_for, Authority};
 use ikigai_gonk::identity::Passkeys;
 use ikigai_gonk::{doors, quic, web};
@@ -23,8 +24,17 @@ const CHROME_ACCEPT: &str =
 
 struct Server {
     addr: SocketAddr,
+    hub: Arc<Kernel>,
+    store: DurableStore,
     _config: tempfile::TempDir,
 }
+
+/// The ledger's own graph, the one enrolled.
+const GRAPH: &str = "urn:iki:ledger:graph:default";
+
+/// How long the index may take to settle after the seed before the test fails. The store
+/// commits at most every second; this is a ceiling for a loaded CI runner, not a wait.
+const SETTLE_CEILING: Duration = Duration::from_secs(60);
 
 impl Server {
     fn start(text_index: bool) -> Server {
@@ -43,6 +53,7 @@ impl Server {
         } else {
             store
         };
+        let kept = store.clone();
         let hub = Arc::new(
             ikigai_gonk::compose_serving_with_lifecycles(
                 store,
@@ -75,6 +86,7 @@ impl Server {
             inquiry: None,
         });
         let http = Arc::new(doors::http_kernel(Arc::clone(&hub), web::space(face)));
+        let hub_kept = Arc::clone(&hub);
         let door = doors::HttpDoor {
             anonymous: grants_for("default", Authority::Write).unwrap(),
             bind: addr,
@@ -93,7 +105,66 @@ impl Server {
         });
         Server {
             addr,
+            hub: hub_kept,
+            store: kept,
             _config: config,
+        }
+    }
+
+    /// The store's own status of the ledger graph's index,
+    /// `urn:iki:store:text-index:graph:{graph}`, read under the ledger's grant.
+    fn index_status(&self) -> String {
+        let thread = ikigai_store::graph_thread(GRAPH);
+        let encoded = thread
+            .strip_prefix("urn:iki:store:graph-written:")
+            .expect("the store's graph thread prefix");
+        let iri = Iri::parse(format!("urn:iki:store:text-index:graph:{encoded}")).unwrap();
+        let cap = Capability::scoped(grants_for("default", Authority::Read).unwrap());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        match runtime.block_on(self.hub.issue(Request::new(Verb::Source, iri), &cap)) {
+            Ok(status) => String::from_utf8_lossy(&status.bytes).into_owned(),
+            Err(e) => format!("(the status read failed: {e})"),
+        }
+    }
+
+    /// The literals the index should hold: every title and body in the ledger's graph, the
+    /// count ikigai-ledger's `complete` compares `documents:` with.
+    fn enrolled_literals(&self) -> usize {
+        let body = ikigai_gonk::text_index::body();
+        self.store
+            .snapshot_iter()
+            .map(|quad| quad.expect("a quad"))
+            .filter(|quad| {
+                quad.graph_name.to_string() == format!("<{GRAPH}>")
+                    && (quad.predicate.as_str() == ikigai_gonk::text_index::TITLE
+                        || quad.predicate.as_str() == body)
+            })
+            .count()
+    }
+
+    /// Wait until the index is complete in the ledger's sense (`state: ready`, `pending: 0`
+    /// and `documents:` equal to the enrolled literals), or fail with the last status read.
+    fn wait_for_complete_index(&self) {
+        let deadline = Instant::now() + SETTLE_CEILING;
+        loop {
+            let status = self.index_status();
+            let literals = self.enrolled_literals();
+            let lines: Vec<&str> = status.lines().map(str::trim).collect();
+            if lines.contains(&"state: ready")
+                && lines.contains(&"pending: 0")
+                && lines.contains(&format!("documents: {literals}").as_str())
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the index of {GRAPH} did not settle within {SETTLE_CEILING:?} at {literals} \
+                 enrolled literals; its last status:\n{status}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
         }
     }
 
@@ -193,15 +264,12 @@ fn position(page: &str, needle: &str) -> usize {
 fn a_search_offers_most_relevant_first_and_lists_the_best_match_first() {
     let server = Server::start(true);
     seed(&server);
-    // The index is derived and may still be committing; the offer appears once it answers.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let page = loop {
-        let page = server.page("/l/default?text=lease");
-        if page.contains("Show the most relevant items first") || Instant::now() > deadline {
-            break page;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    };
+    // The index is derived and commits after the writes; wait on the store's own status
+    // until it is complete, as the ledger checks before it ranks (ikigai-ledger 0.26's
+    // `complete`). Through ikigai-store 0.6.3 a first build overlapping the seed's writes could
+    // settle one document high and never complete (ledger #4448, #4438).
+    server.wait_for_complete_index();
+    let page = server.page("/l/default?text=lease");
     assert!(
         page.contains("Show the most relevant items first"),
         "a ready index is offered under a search: {page}"
@@ -223,21 +291,8 @@ fn a_search_offers_most_relevant_first_and_lists_the_best_match_first() {
         "{plain}"
     );
 
-    // The ledger ranks only once the index has committed every write and its document count
-    // matches the graph (ikigai-ledger 0.26's `complete`); for a moment after the seed's writes
-    // it refuses, in words, and the page shows that refusal. Wait it out, as for the offer.
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let ranked = loop {
-        let ranked = server.page("/l/default?text=lease&sort=relevance");
-        if ranked.contains("Most relevant items first.") || Instant::now() > deadline {
-            break ranked;
-        }
-        assert!(
-            ranked.contains("none are listed. Most relevant ordering is not available:"),
-            "while it cannot rank, the page says so and lists nothing: {ranked}"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-    };
+    // The index is complete, so the ledger ranks at once.
+    let ranked = server.page("/l/default?text=lease&sort=relevance");
     assert!(
         ranked.contains("Most relevant items first."),
         "the order is said in words: {ranked}"
