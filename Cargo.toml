@@ -1401,6 +1401,10 @@ ikigai-fn = "0.12.0"
 # ★ 0.6.0 (ledger #4069, the core 0.4.0 cascade): no core dependency of its own; it releases with
 # the transports (ipc, quic, web 0.6.0), so it moves in step. `"0.6.0"` is `<0.7.0`.
 ikigai-passkey = "0.6.0"
+# The session's proof of possession (ledger #4543): every write a signed-in page makes is signed
+# by a non-extractable WebCrypto ECDSA P-256 key bound at the sign-in, and verified with the same
+# vetted crate `ikigai-passkey` verifies passkeys with — already in the graph, no second copy.
+p256 = { version = "0.13", features = ["ecdsa"] }
 # A ledger's Turtle face re-serialized as RDF/XML for the stylesheet — `oxigraph::io`,
 # already in the graph through `ikigai-store` (with the same `default-features = false`, so
 # this line adds no feature and no compile).
