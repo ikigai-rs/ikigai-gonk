@@ -769,7 +769,7 @@ pub fn access(
         Timestamp::from_millis(at_ms),
         request.target.as_str(),
         door.as_str(),
-        verb(request.verb),
+        verb_word(request.verb),
         outcome,
         caller(door, capability),
     )
@@ -795,7 +795,8 @@ pub fn access(
     line
 }
 
-fn verb(verb: Verb) -> &'static str {
+/// The word a line's `verb=` column carries for `verb`.
+pub(crate) fn verb_word(verb: Verb) -> &'static str {
     match verb {
         Verb::Source => "source",
         Verb::Sink => "sink",

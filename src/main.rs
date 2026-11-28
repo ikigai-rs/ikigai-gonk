@@ -556,7 +556,7 @@ fn serve(flags: &config::Flags) -> ! {
     let mut mounted: Vec<Arc<dyn ikigai_core::Space>> = settings
         .mounts
         .iter()
-        .map(|m| mount::space(m, &model_calls))
+        .map(|m| mount::space_recorded(m, &model_calls, record.clone()))
         .collect();
     // ★ The layer bindings' mounts (ledger #1190): `urn:layer:{layer}` per `gonk.layer` line,
     // then `urn:layers:` and `urn:collab:`, on one door nothing dials until it is used.
@@ -1662,7 +1662,12 @@ fn mount_line(settings: &config::Settings, explains: bool) -> String {
         .mounts
         .iter()
         .filter(|mount| mount.prefix != mount::LLM_PREFIX)
-        .map(|mount| format!("{}* at {} (prefer)", mount.prefix, mount.target))
+        .map(|mount| {
+            format!(
+                "{}* at {} (sector {}; prefer)",
+                mount.prefix, mount.target, mount.sector
+            )
+        })
         .collect();
     let others = if others.is_empty() {
         String::new()
@@ -1681,17 +1686,18 @@ fn llm_line(settings: &config::Settings, explains: bool) -> String {
     };
     if !explains {
         return format!(
-            "{} — mounted, but no gonk.browse.root, so nothing here derives through it",
-            mount.target
+            "{} (sector {}) — mounted, but no gonk.browse.root, so nothing here derives through it",
+            mount.target, mount.sector
         );
     }
     let tiers = &settings.explain;
     format!(
-        "{} (prefer; dialed on first use) — explain/review bound; file {} @{}, dir {} @{}, \
+        "{} (sector {}; prefer; dialed on first use) — explain/review bound; file {} @{}, dir {} @{}, \
          review {} @{}, pr {} @{} tokens; at most {} model calls an hour, every caller \
          together (gonk.mount.calls_per_hour). Deriving needs urn:cap:net:{}, which \
          `--browse derive` mints and nothing else does",
         mount.target,
+        mount.sector,
         tiers.file.provider,
         tiers.file.max_tokens,
         tiers.dir.provider,

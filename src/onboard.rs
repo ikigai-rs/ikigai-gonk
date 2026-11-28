@@ -970,6 +970,12 @@ struct Kind {
 }
 
 /// The fold over the grants layer: every record, and the current entitlement per fingerprint.
+///
+/// ★ Keyed by fingerprint, so each key is one peer's view of a principal: treat it as opaque,
+/// and never assume another peer sees the same string (ledger #4555, the rule at
+/// [`crate::quic::client_iri`]). ⚠ The grants layer it folds is the one table today that two
+/// services read by one fingerprint (the layer host and this gonk, each for its own half of a
+/// signed entitlement); add no other reader, and key nothing new by it.
 struct Fold {
     records: Vec<Record>,
     /// fingerprint → the current verified entitlement (in force, revoking or expired).

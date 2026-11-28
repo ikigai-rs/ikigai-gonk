@@ -3236,6 +3236,37 @@ which gonk serves itself — the ledger. A mount is composed in front of gonk's 
 would hand those names to the peer; mount the peer under a prefix of its own
 ```
 
+### A peer's sector (ledger #4555)
+
+Every mounted peer has a **sector**: a stable IRI that names the peer,
+`urn:iki:gonk:sector:name:<name>`. Nothing derives from it yet. It is the input a later per-peer
+identifier needs (ikigai-core's `docs/design/pairwise-identifiers.md`), and it names the peer on
+the audit line of every call gonk sends it.
+
+- **The default is the peer's configured name**: the last part of a `quic://` peer's certificate
+  directory (`peers/plasma` above gives `urn:iki:gonk:sector:name:plasma`), or the stem of a
+  socket's file name (`dashboard.sock` gives `urn:iki:gonk:sector:name:dashboard`). It comes from
+  the configuration alone, so it stays the same at every start and when the peer's certificate
+  rotates in that directory.
+- **An optional last word names it instead**: `sector=<name>` (letters, digits, `.`, `_`, `-`)
+  for `urn:iki:gonk:sector:name:<name>`, or `sector=<IRI>` for any whole IRI. Give one when two
+  peers' directories share a last part, since otherwise they share a sector.
+
+```toml
+gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma sector=model-host"
+```
+
+A line with no `sector=` word, which is every line written before this, loads unchanged and gets
+the default. The startup banner names each mount's sector. Every call a mount sends its peer
+writes one `urn:iki:gonk:class:PeerCall` entry into gonk's log segment (`gonk/log/`), beside the
+door lines: the forwarded IRI, `peer`, `sector`, `verb`, `outcome`, `dur`, and the caller's
+`principal` when the call carries one. That includes the `Meta` a mount asks first and a call
+to a peer that is down. A failed dial's stderr line names the sector too.
+
+```text
+2026-11-28T21:02:07.316Z <urn:iki:gonk:class:PeerCall> urn:llm:ask seq=3 peer=/tmp/model.sock sector=urn:iki:gonk:sector:name:model verb=source outcome=ok dur=0 principal=urn:iki:host:gonk:client:ab12
+```
+
 ## A ledger bound to a task layer (ledger #1190)
 
 A **layer** is a shared space on a layer host ([`ikigai-layers`](https://github.com/ikigai-rs/ikigai-layers),

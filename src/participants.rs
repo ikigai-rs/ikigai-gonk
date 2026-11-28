@@ -20,6 +20,9 @@ use ikigai_core::{ArgRef, Iri, Request, Verb};
 use ikigai_ledger::vocabulary as v;
 
 /// The participants graph, named to `ikigai_ledger::SpaceConfig::participants`.
+///
+/// ★ A principal it is keyed by (for a QUIC client, its fingerprint IRI) is one peer's view of a principal: treat it as opaque, and never assume another
+/// peer sees the same string (ledger #4555, the rule at [`crate::quic::client_iri`]).
 pub const GRAPH: &str = "urn:collab:participants";
 
 /// What an enrollment says about its principal.

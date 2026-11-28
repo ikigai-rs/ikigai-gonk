@@ -31,6 +31,9 @@
 //! # which row a holder counts in on the Agents tab; repeatable, first match wins (src/holders.rs)
 //! # gonk.holder.alias = "lawnboy -> lawnboy-claude before 2026-10-21"
 //! gonk.mount = "prefer urn:llm:=quic://127.0.0.1:4433 ~/.config/ikigai/gonk/quic/peers/plasma"
+//! # a mount's optional last word names the peer's sector (ledger #4555): `sector=<name>`
+//! # (urn:iki:gonk:sector:name:<name>) or a whole IRI; with none, the certificate directory's
+//! # name (`plasma` above) or the socket file's stem
 //! # gonk.mount.calls_per_hour = 2000   # calls that reach the mounted model, every caller
 //!                                       # together (this IS the default; 0 for none)
 //! # any other prefix a peer serves, but never one gonk serves itself; repeatable
@@ -4088,6 +4091,8 @@ mod tests {
             [Mount {
                 prefix: "urn:llm:".to_string(),
                 target: crate::mount::Target::Socket(PathBuf::from("/home/u/.ikigai/host.sock")),
+                // No `sector=` word: the default, from the peer's configured name (ledger #4555).
+                sector: "urn:iki:gonk:sector:name:host".to_string(),
             }]
         );
         assert!(!settings.explains(), "no browse root, nothing to explain");
