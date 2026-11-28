@@ -2629,18 +2629,22 @@ dependencies = [
 
 [[package]]
 name = "ikigai-secret"
-version = "0.5.0"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4730328b789dd86ad76d45e41b1aa991e2aa32da1b8083a97f54e128011713f0"
+checksum = "b2b53b894c9ca00ffa6b29773f1e0d2f030a857499363a88cce570270db6a23e"
 dependencies = [
  "age",
  "async-trait",
  "ed25519-dalek",
+ "glob",
  "ikigai-core",
+ "ikigai-encrypt",
  "libc",
  "rand_core 0.6.4",
  "robius-authentication",
  "security-framework",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

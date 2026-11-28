@@ -276,6 +276,16 @@ fn serve(flags: &config::Flags) -> ! {
             config_path.display()
         ))
     });
+    // ★ Where gonk keeps its secrets (ledger #4506): the `[secret]` section, read once into the
+    // one keystore every secret goes through. A section ikigai-secret refuses stops the server
+    // here with its own sentence, before anything is opened; nothing in it is half-applied.
+    let keystore = ikigai_gonk::secret::Keystore::from_config_text(&text, Some(&homes.home))
+        .unwrap_or_else(|e| {
+            fail(&format!(
+                "{e}\n  (config read from {})",
+                config_path.display()
+            ))
+        });
     // Ledger #3811: how long every page and framed face keeps trying through a restart, before
     // anything can render one.
     ikigai_gonk::ui_retry::install(settings.ui_retry);
@@ -656,7 +666,7 @@ fn serve(flags: &config::Flags) -> ! {
     // ★ The onboarding controller (ledger #2009, `onboard`), only with a `gonk.onboard` line:
     // its resources beside the review family's, its key in the keystore, its door its own.
     let onboard = settings.onboard.as_ref().map(|config| {
-        ikigai_gonk::onboard::Onboard::from_config(config, layout.clone())
+        ikigai_gonk::onboard::Onboard::from_config(config, layout.clone(), keystore.backend())
             .unwrap_or_else(|e| fail(&e))
     });
     if let Some(onboard) = &onboard {
@@ -1267,6 +1277,11 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  layers  {layers_line}");
         eprintln!("  inquiry {inquiry_line}");
         eprintln!("  onboard {onboard_line}");
+        eprintln!("  secrets {}", keystore.describe());
+        // ikigai-secret 0.5.4's notice for an install from before with no section (ledger #4506).
+        if let Some(notice) = keystore.notice() {
+            eprintln!("  secrets {notice}");
+        }
         eprintln!("  sensors {sensor_line}");
         eprintln!("  lapses  {lapse_line}");
         eprintln!("  constraint  {constraint_line}");
@@ -2116,6 +2131,10 @@ fn onboard_command(args: &ikigai_gonk::onboard::Args) {
         // here only the Keychain mint and the terminal are chosen (ledger #2123).
         use std::io::IsTerminal;
         let (config, text) = config::read_config(&args.flags, &homes).unwrap_or_else(|e| fail(&e));
+        // ★ The keystore the `[secret]` section names (ledger #4506): a refused section stops
+        // init before anything is minted.
+        let keystore = ikigai_gonk::secret::Keystore::from_config_text(&text, Some(&homes.home))
+            .unwrap_or_else(|e| fail(&format!("{e}\n  (config read from {})", config.display())));
         let env = ikigai_gonk::onboard_init::Env {
             homes: homes.clone(),
             config,
@@ -2137,7 +2156,7 @@ fn onboard_command(args: &ikigai_gonk::onboard::Args) {
         } else {
             &mut defaults
         };
-        let mut mint = |key: &str| onb::generate_key(ikigai_secret::default_backend(), None, key);
+        let mut mint = |key: &str| onb::generate_key_in(keystore.space(None), key);
         let complete =
             ikigai_gonk::onboard_init::run(flags, &env, ask, &mut mint, &mut std::io::stdout())
                 .unwrap_or_else(|e| fail(&e));

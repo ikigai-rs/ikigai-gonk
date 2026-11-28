@@ -1013,8 +1013,9 @@ impl Onboard {
         })
     }
 
-    /// The production controller for `config`: the door dialled lazily, the platform keystore,
-    /// the public key and the door's server certificate read from their files now.
+    /// The production controller for `config`: the door dialled lazily, `keystore` (the one
+    /// [`crate::secret::Keystore`] the `[secret]` section built, ledger #4506), the public key
+    /// and the door's server certificate read from their files now.
     ///
     /// # Errors
     ///
@@ -1022,6 +1023,7 @@ impl Onboard {
     pub fn from_config(
         config: &Config,
         layout: crate::quic::Layout,
+        keystore: Arc<dyn ikigai_secret::Backend>,
     ) -> std::result::Result<Arc<Onboard>, String> {
         let read = |path: &Path, what: &str| {
             std::fs::read_to_string(path).map_err(|e| {
@@ -1050,7 +1052,7 @@ impl Onboard {
             door_server_cert,
             lobby: config.lobby.clone(),
             grants: config.grants.clone(),
-            keystore: ikigai_secret::default_backend(),
+            keystore,
             key: config.key.clone(),
             controller_key,
             kinds: config.kinds.clone(),
@@ -2842,6 +2844,21 @@ pub fn generate_key(
         Some(gate) => ikigai_secret::space_with_gate(keystore, gate),
         None => ikigai_secret::space(keystore),
     };
+    generate_key_in(space, key)
+}
+
+/// [`generate_key`] in `space`: the `urn:secret:*` space of the configured keystore
+/// ([`crate::secret::Keystore::space`], ledger #4506), so the key lands in the store the
+/// `[secret]` section routes `key` to.
+///
+/// # Errors
+///
+/// A key already stored under the name (generate never replaces one), a refused gate, a store
+/// that refuses writes.
+pub fn generate_key_in(
+    space: ikigai_core::EndpointSpace,
+    key: &str,
+) -> std::result::Result<String, String> {
     let kernel = Kernel::new(Arc::new(space));
     let request = Request::new(Verb::Source, iri(ikigai_secret::GENERATE_IRI))
         .with_arg("into", ArgRef::Inline(key.as_bytes().to_vec()))
