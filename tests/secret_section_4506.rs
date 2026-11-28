@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use ikigai_gonk::onboard::{generate_key_in, DEFAULT_KEY, INVITE_SECRET_PREFIX};
 use ikigai_gonk::secret::Keystore;
-use ikigai_secret::{Backend, FileBackend, PresenceGate, SecretConfig};
+use ikigai_secret::{Backend, FileBackend, Found, PresenceGate, SecretConfig};
 
 /// A gate that finds someone at the machine, so the mint runs headless (Touch ID on a Mac).
 fn present() -> Option<Arc<dyn PresenceGate>> {
@@ -50,7 +50,9 @@ fn routed_text(gonk: &Path, other: &Path) -> String {
 fn no_section_is_the_store_gonk_always_used() {
     let home = tempfile::tempdir().unwrap();
     let text = "gonk.bind = \"127.0.0.1:1062\"\ngonk.browse.root = core=~/git/core\n";
-    let keystore = Keystore::from_config_text(text, Some(home.path())).unwrap();
+    assert_eq!(ikigai_gonk::secret::section(text).unwrap(), None);
+    // An install from before (what ikigai-secret's `found_install` answers for one).
+    let keystore = Keystore::for_host(None, Some(home.path()), Found::Existing).unwrap();
     assert!(!keystore.is_configured());
     // The same configuration as no section at all, which ikigai-secret builds exactly as
     // `default_backend()` does: one store, the platform's, as the default, with no routes.
@@ -72,6 +74,26 @@ fn no_section_is_the_store_gonk_always_used() {
     let said = keystore.describe();
     assert!(said.contains("as before"), "{said}");
     assert!(!said.contains("reserved"), "{said}");
+    // And ikigai-secret's notice, word for word, as the one extra start-up line.
+    assert_eq!(keystore.notice(), none.notice().as_deref());
+    assert!(keystore.notice().unwrap().contains("age-file"));
+}
+
+#[test]
+fn a_new_install_keeps_todays_store_until_gonk_resolves_age_identities() {
+    let home = tempfile::tempdir().unwrap();
+    let keystore = Keystore::for_host(None, Some(home.path()), Found::Nothing).unwrap();
+    // ikigai-secret 0.5.4 would make an age-file store whose identity the host resolves; gonk
+    // resolves none yet (ledger #4495), so the new install keeps `default_backend()`'s store.
+    let today = SecretConfig::from_section(None, Some(home.path())).unwrap();
+    assert_eq!(keystore.routing().config(), &today);
+    let wanted = SecretConfig::for_host(None, Some(home.path()), Found::Nothing).unwrap();
+    assert_eq!(wanted.default_store(), "age-file");
+    assert!(wanted.build_with_keys(Default::default()).is_err());
+    // No notice: it would tell a new install that it got age-file.
+    assert_eq!(keystore.notice(), None);
+    let said = keystore.describe();
+    assert!(said.contains("ledger #4495"), "{said}");
 }
 
 #[test]
@@ -190,4 +212,38 @@ fn an_unknown_key_refuses_to_start_naming_its_line() {
     );
     assert!(stderr.contains("line 4"), "{stderr}");
     assert!(stderr.contains("fallback"), "{stderr}");
+}
+
+#[test]
+fn a_malformed_section_refuses_onboard_init_with_ikigai_secrets_sentence() {
+    let root = tempfile::tempdir().unwrap();
+    let config_home = root.path().join("cfg");
+    let data_home = root.path().join("data");
+    let home = root.path().join("home");
+    for dir in [&config_home, &data_home, &home] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let text = "gonk.bind = \"127.0.0.1:0\"\n\n[secret]\ndefault = \"nowhere\"\n";
+    std::fs::write(config_home.join("config.toml"), text).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ikigai-gonk"))
+        .args(["onboard", "init"])
+        .arg("--config-home")
+        .arg(&config_home)
+        .arg("--data-home")
+        .arg(&data_home)
+        .env("HOME", &home)
+        .env_remove("IKIGAI_SECRETS")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("run ikigai-gonk");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    let section = ikigai_gonk::secret::section(text).unwrap();
+    let refusal = SecretConfig::from_section(section.as_ref(), Some(&home))
+        .unwrap_err()
+        .to_string();
+    assert!(stderr.contains(&refusal), "{stderr}\n---\n{refusal}");
+    // Nothing minted anywhere.
+    assert!(std::fs::read_dir(&home).unwrap().next().is_none());
+    assert!(std::fs::read_dir(&data_home).unwrap().next().is_none());
 }

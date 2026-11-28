@@ -1278,6 +1278,10 @@ fn serve(flags: &config::Flags) -> ! {
         eprintln!("  inquiry {inquiry_line}");
         eprintln!("  onboard {onboard_line}");
         eprintln!("  secrets {}", keystore.describe());
+        // ikigai-secret 0.5.4's notice for an install from before with no section (ledger #4506).
+        if let Some(notice) = keystore.notice() {
+            eprintln!("  secrets {notice}");
+        }
         eprintln!("  sensors {sensor_line}");
         eprintln!("  lapses  {lapse_line}");
         eprintln!("  constraint  {constraint_line}");

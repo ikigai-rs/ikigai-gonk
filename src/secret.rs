@@ -23,10 +23,24 @@
 //! store = "gonk"
 //! ```
 //!
-//! With no section, the keystore is exactly what `ikigai_secret::default_backend()` built before
-//! (the Keychain under `ikigai-secret` on a Mac, the file store in the data home elsewhere), and
-//! its space is the plain `urn:secret:*` space. A section that ikigai-secret refuses stops the
-//! server (and `onboard init`) with ikigai-secret's own sentence; nothing in it is half-applied.
+//! With no section, gonk follows ikigai-secret 0.5.4's host order ([`ikigai_secret::found_install`]
+//! then [`SecretConfig::for_host`]), with one hold:
+//!
+//! - **An install from before** ([`Found::Existing`]: Keychain items under `ikigai-secret`, a
+//!   file store with secrets in it, or `IKIGAI_SECRETS` set) keeps exactly the store
+//!   `default_backend()` built before, and the start-up summary prints ikigai-secret's
+//!   [`SecretConfig::notice`] as one line.
+//! - **A new install** ([`Found::Nothing`]) would get ikigai-secret's `age-file` store, whose
+//!   identity is [`ikigai_secret::HOST_DEFAULT_IDENTITY`]. ikigai-secret resolves no identity
+//!   itself: the host builds the age keys and passes them to
+//!   [`SecretConfig::build_with_keys`]. Gonk resolves none yet (ledger #4495), so a new install
+//!   keeps today's store, `default_backend()`'s, and says so at start.
+//! - **An `age-file` marker** ([`Found::AgeFile`], left by another ikigai host that made the
+//!   store) stays `age-file`. Gonk has no keys for it, so it refuses to start with
+//!   ikigai-secret's sentence. It never writes plaintext beside the encrypted items.
+//!
+//! No secret moves between stores. A section ikigai-secret refuses stops the server (and
+//! `onboard init`) with ikigai-secret's own sentence; nothing in it is half-applied.
 //!
 //! The rest of `config.toml` is gonk's `key = value` line grammar, which a whole-document TOML
 //! parse refuses (repeated keys, bare values), so only the `[secret]` tables are parsed as TOML:
@@ -35,41 +49,88 @@
 //! The section is read at start only: gonk has no reload of it, so nothing here cuts
 //! [`ikigai_secret::CONFIG_THREAD`]; a changed section takes effect at the next start.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use ikigai_core::EndpointSpace;
-use ikigai_secret::{Backend, PresenceGate, RoutingBackend, SecretConfig, SecretSection};
+use ikigai_secret::{Backend, Found, PresenceGate, RoutingBackend, SecretConfig, SecretSection};
+
+/// What gonk adds after ikigai-secret's refusal of an `age-file` store gonk has no keys for.
+pub const NO_AGE_IDENTITY: &str = "ikigai-gonk does not resolve age identities yet (ledger \
+                                   #4495), so it cannot open an age-file store; nothing was \
+                                   read or written.";
 
 /// The secrets every part of gonk reads and writes: one routing backend, built once at start.
 #[derive(Clone)]
 pub struct Keystore {
     routing: Arc<RoutingBackend>,
     configured: bool,
+    found: Found,
+    notice: Option<String>,
 }
 
 impl Keystore {
     /// The keystore `config.toml`'s text names, `home` being the home directory a store path
-    /// beginning with `~/` is read under.
+    /// beginning with `~/` is read under, and the one whose data home ikigai-secret looks in for
+    /// an install from before ([`ikigai_secret::found_install`], asked only with no section).
     ///
     /// # Errors
     ///
     /// A `[secret]` section that does not read as TOML, or that ikigai-secret refuses: the
-    /// sentence ikigai-secret wrote (every problem, each naming its line), unchanged.
+    /// sentence ikigai-secret wrote (every problem, each naming its line), unchanged. The same
+    /// for an `age-file` store, which gonk has no keys for yet.
     pub fn from_config_text(text: &str, home: Option<&Path>) -> Result<Keystore, String> {
         let section = section(text)?;
-        let config =
-            SecretConfig::from_section(section.as_ref(), home).map_err(|e| e.to_string())?;
-        Ok(Keystore::from_config(config))
+        let found = match section {
+            // A section is all there is to it: what is on the machine is not consulted.
+            Some(_) => Found::Existing,
+            None => ikigai_secret::found_install(home).map_err(|e| {
+                format!("ikigai-secret could not tell whether secrets are kept here yet: {e}")
+            })?,
+        };
+        Keystore::for_host(section.as_ref(), home, found)
     }
 
-    /// The keystore over a checked configuration.
-    pub fn from_config(config: SecretConfig) -> Keystore {
-        let configured = config.is_configured();
-        Keystore {
-            routing: Arc::new(config.build()),
-            configured,
+    /// The keystore for `section` (or none) on a machine where ikigai-secret found `found`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_config_text`].
+    pub fn for_host(
+        section: Option<&SecretSection>,
+        home: Option<&Path>,
+        found: Found,
+    ) -> Result<Keystore, String> {
+        let config = match (section, found) {
+            // The hold (ledger #4495): a new install's age-file store needs an identity gonk
+            // does not resolve yet, so it keeps the store `default_backend()` builds.
+            (None, Found::Nothing) => SecretConfig::from_section(None, home),
+            _ => SecretConfig::for_host(section, home, found),
         }
+        .map_err(|e| e.to_string())?;
+        // ikigai-secret's notice is for an install from before; a new install kept on today's
+        // store by the hold would be told something untrue ("new installs now get age-file").
+        let notice = match (section, found) {
+            (None, Found::Existing) => config.notice(),
+            _ => None,
+        };
+        let configured = config.is_configured();
+        let routing = config
+            .build_with_keys(BTreeMap::new())
+            .map_err(|e| format!("{e}\n{NO_AGE_IDENTITY}"))?;
+        Ok(Keystore {
+            routing: Arc::new(routing),
+            configured,
+            found,
+            notice,
+        })
+    }
+
+    /// ikigai-secret's one start-up line for an install from before with no section, when it
+    /// has one.
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
     /// The backend, for the places that read and write a secret directly (the signer, the
@@ -112,6 +173,14 @@ impl Keystore {
         let config = self.routing.config();
         if !self.configured {
             let store = config.default_store();
+            if self.found == Found::Nothing {
+                return format!(
+                    "the {store} store (no [secret] section in config.toml, and no secrets kept \
+                     here yet); gonk's keys and invite codes are kept there. A new install keeps \
+                     this store, not ikigai-secret's age-file store, until gonk resolves age \
+                     identities (ledger #4495)"
+                );
+            }
             return format!(
                 "the {store} store, as before (no [secret] section in config.toml); gonk's keys \
                  and invite codes are kept there"
