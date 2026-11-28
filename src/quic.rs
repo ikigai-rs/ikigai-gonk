@@ -118,11 +118,17 @@ impl Layout {
     }
 
     /// One directory per trusted client.
+    ///
+    /// ★ A client fingerprint here is one peer's view of a principal: treat it as opaque, and never assume another
+    /// peer sees the same string (ledger #4555, the rule at [`crate::quic::client_iri`]).
     pub fn clients_dir(&self) -> PathBuf {
         self.quic_dir().join("clients")
     }
 
     /// Fingerprint → grant name.
+    ///
+    /// ★ The fingerprint key is one peer's view of a principal: treat it as opaque, and never assume another
+    /// peer sees the same string (ledger #4555, the rule at [`crate::quic::client_iri`]).
     pub fn clients_json(&self) -> PathBuf {
         self.dir.join("clients.json")
     }
@@ -163,7 +169,11 @@ impl Layout {
         Ok(FileLock(Some(file)))
     }
 
-    /// Grant name → scopes.
+    /// Grant name → scopes: what a fingerprint in [`clients_json`](Self::clients_json) is
+    /// granted.
+    ///
+    /// ★ The fingerprint that reaches a grant through it is one peer's view of a principal: treat it as opaque, and never assume another
+    /// peer sees the same string (ledger #4555, the rule at [`crate::quic::client_iri`]).
     pub fn grants_json(&self) -> PathBuf {
         self.dir.join("grants.json")
     }
@@ -598,6 +608,15 @@ pub const CLIENT_IRI_PREFIXES: [&str; 2] = [CLIENT_IRI_PREFIX, LEGACY_CLIENT_IRI
 /// hex, no colons) — what the access log writes as a QUIC request's `principal`, and the
 /// principal-shaped `author` a write through that connection may name.
 ///
+/// ★ **Opaque, never keyed across sectors** (ledger #4555; ikigai-core
+/// `docs/design/pairwise-identifiers.md`, task 2): the key is ONE peer's view of a principal.
+/// Treat it as opaque, and never assume another peer sees the same string. Every table keyed by it
+/// (`clients.json`, the `clients/` directory, the grants a fingerprint reaches in `grants.json`,
+/// the participants graph, an onboarding entitlement) is read by this server alone: no
+/// allowlist, registry or grant table keyed by it is ever to be shared with a service in
+/// another sector. Today a participant is known by this one fingerprint everywhere, so two
+/// services COULD join their records on it; the rule keeps per-peer identifiers open.
+///
 /// ```
 /// assert_eq!(
 ///     ikigai_gonk::quic::client_iri("AB:CD"),
@@ -653,6 +672,9 @@ pub fn same_client(a: &str, b: &str) -> bool {
 /// a certificate still trusted at the TLS handshake (trust is read at startup) kept a grant
 /// after `client remove`. Now a certificate with no entry is refused whatever `default` says,
 /// at its next connection and at its next call on a connection it already holds.
+///
+/// ★ Each fingerprint key is one peer's view of a principal: treat it as opaque, and never assume another
+/// peer sees the same string (ledger #4555, the rule at [`crate::quic::client_iri`]).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Enrolment {
     clients: BTreeMap<String, Option<String>>,
@@ -1390,6 +1412,9 @@ pub const DRAIN_CAP: Duration = Duration::from_secs(2);
 /// # Errors
 ///
 /// Why the fingerprint holds no authority, in a sentence that names the file to look at.
+///
+/// ★ `fingerprint` is one peer's view of a principal: treat it as opaque, and never assume
+/// another peer sees the same string (ledger #4555, the rule at [`client_iri`]).
 pub fn current_authority(
     layout: &Layout,
     fingerprint: &str,

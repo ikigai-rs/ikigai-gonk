@@ -375,18 +375,123 @@ pub struct Mount {
     pub prefix: String,
     /// Where it resolves.
     pub target: Target,
+    /// The peer's SECTOR: a stable IRI naming the peer, from the line's `sector=` word or, when
+    /// it has none, from the peer's configured name ([`default_sector`], ledger #4555).
+    pub sector: String,
 }
 
-/// Parse one `gonk.mount` line: `prefer <prefix>=<target> [cert-dir]`, the cli's spelling.
+/// The namespace of a peer's sector IRI (ledger #4555): `urn:iki:gonk:sector:name:{name}`.
+///
+/// ★ **Why a sector, and why nothing derives from it yet.** ikigai-core's design note
+/// `docs/design/pairwise-identifiers.md` (tasks 2 and 3) keeps per-peer identifiers open
+/// without moving to them: a participant is still known by one certificate fingerprint, and
+/// the sector is the input a later per-peer derivation needs. Today it does one thing: it
+/// names the peer on the audit line of every call to it ([`PEER_CALL_CLASS`]), by a name
+/// that does not change when the peer's certificate rotates.
+///
+/// The naming rule: singular, the type first, every partition by a NAMED key — `sector:name:`,
+/// never `sectors:`. Under `urn:iki:gonk:`, which a mount may never claim ([`OWN_PREFIXES`]),
+/// and which nothing binds under `sector:`: the IRI is a name, not a resource.
+pub const SECTOR_PREFIX: &str = "urn:iki:gonk:sector:name:";
+
+/// The class of the audit entry written for every call a mount sends its peer (ledger #4555):
+/// the forwarded IRI, then `peer` (the target, as every other line about the peer names it),
+/// `sector` ([`Mount::sector`]), `verb`, `outcome`, `dur` and, when the call carries one,
+/// `principal`. Written into gonk's one record ([`crate::access::Record`]), beside the door
+/// lines; nothing when the log is off.
+pub const PEER_CALL_CLASS: &str = "urn:iki:gonk:class:PeerCall";
+
+/// The sector IRI of the peer named `name`: [`SECTOR_PREFIX`] and the name, percent-encoded.
+///
+/// ```
+/// use ikigai_gonk::mount::sector_iri;
+/// assert_eq!(sector_iri("plasma"), "urn:iki:gonk:sector:name:plasma");
+/// assert_eq!(sector_iri("two words"), "urn:iki:gonk:sector:name:two%20words");
+/// ```
+pub fn sector_iri(name: &str) -> String {
+    format!("{SECTOR_PREFIX}{}", ikigai_fn::html::url_segment(name))
+}
+
+/// The sector a mount line with no `sector=` word gets: [`sector_iri`] of the peer's
+/// CONFIGURED NAME.
+///
+/// A `gonk.mount` line has no name field, so the peer's name is the one the operator gave it
+/// in the configuration: the last component of a `quic://` peer's certificate directory
+/// (`~/.config/ikigai/gonk/quic/peers/plasma` is `plasma`, the layout the README and
+/// `docs/fresh-machine.md` set up), and the stem of a socket's file name (`~/.ikigai/host.sock`
+/// is `host`). Both come from the configuration text alone, so the sector is the same at
+/// every start, and neither reads a certificate, so it survives the peer's certificate
+/// rotation, which rewrites the files in that directory and never renames it.
+///
+/// ⚠ Two peers whose directories share a last component get one sector; give one of them a
+/// `sector=` word. (Refusing it would refuse a configuration that loads today.)
+///
+/// ```
+/// use std::path::PathBuf;
+/// use ikigai_gonk::mount::{default_sector, Target};
+/// let quic = Target::Quic {
+///     authority: "127.0.0.1:4433".into(),
+///     certs: PathBuf::from("/home/u/.config/ikigai/gonk/quic/peers/plasma"),
+/// };
+/// assert_eq!(default_sector(&quic), "urn:iki:gonk:sector:name:plasma");
+/// let socket = Target::Socket(PathBuf::from("/home/u/.ikigai/host.sock"));
+/// assert_eq!(default_sector(&socket), "urn:iki:gonk:sector:name:host");
+/// ```
+pub fn default_sector(target: &Target) -> String {
+    let name = match target {
+        Target::Quic { certs, .. } => certs.file_name(),
+        Target::Socket(path) => path.file_stem(),
+    };
+    match name.map(|name| name.to_string_lossy()) {
+        Some(name) if !name.is_empty() => sector_iri(&name),
+        // A directory spelled `/` or `..` has no name of its own: the target is the only
+        // stable thing left to name the peer by.
+        _ => sector_iri(&target.to_string()),
+    }
+}
+
+/// A `sector=` word's value, as the sector IRI it names: a bare name (`[A-Za-z0-9._-]`) is
+/// put under [`SECTOR_PREFIX`]; anything with a `:` must be a whole IRI, taken as written.
+fn sector_of(line: &str, value: &str) -> Result<String, String> {
+    if value.contains(':') {
+        return Iri::parse(value)
+            .map(|iri| iri.as_str().to_string())
+            .map_err(|e| format!("gonk.mount `{line}`: sector=`{value}` is not an IRI: {e}"));
+    }
+    if value.is_empty()
+        || !value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(format!(
+            "gonk.mount `{line}`: sector=`{value}` must be a name (letters, digits, `.`, `_`, \
+             `-`), which becomes {SECTOR_PREFIX}<name>, or a whole IRI"
+        ));
+    }
+    Ok(sector_iri(value))
+}
+
+/// Parse one `gonk.mount` line: `prefer <prefix>=<target> [cert-dir] [sector=<name or IRI>]`,
+/// the cli's spelling plus gonk's optional `sector=` word ([`Mount::sector`]; without it,
+/// [`default_sector`]).
 ///
 /// `home` is `$HOME`, for `~/` in the target and the certificate directory.
+///
+/// ```
+/// use ikigai_gonk::mount;
+/// let home = std::path::Path::new("/home/nobody");
+/// let named = mount::parse("prefer urn:llm:=/tmp/llm.sock sector=model-host", home).unwrap();
+/// assert_eq!(named.sector, "urn:iki:gonk:sector:name:model-host");
+/// let unnamed = mount::parse("prefer urn:llm:=/tmp/llm.sock", home).unwrap();
+/// assert_eq!(unnamed.sector, "urn:iki:gonk:sector:name:llm");
+/// ```
 ///
 /// # Errors
 ///
 /// When the mode is not `prefer`, the prefix does not end in `:` (or is no more than a
 /// scheme) or overlaps one gonk serves itself ([`own_overlap`]), a `quic://` target
-/// carries no certificate directory (or one that is not a directory), or a socket target
-/// carries one.
+/// carries no certificate directory (or one that is not a directory), a socket target
+/// carries one, or a `sector=` word is given twice or names neither a name nor an IRI.
 pub fn parse(line: &str, home: &Path) -> Result<Mount, String> {
     let mut parts = line.split_whitespace();
     let mode = parts
@@ -425,12 +530,25 @@ pub fn parse(line: &str, home: &Path) -> Result<Mount, String> {
              those names to the peer; mount the peer under a prefix of its own"
         ));
     }
-    let certs = parts.next().map(|dir| expand_home(dir, home));
-    if let Some(extra) = parts.next() {
-        return Err(format!(
-            "gonk.mount `{line}`: unexpected `{}`",
-            extra.trim_matches('"')
-        ));
+    // The certificate directory is the one positional word left; `sector=` may come anywhere
+    // after the spec.
+    let (mut certs, mut sector) = (None, None);
+    for word in parts {
+        if let Some(value) = word.strip_prefix("sector=") {
+            if sector.is_some() {
+                return Err(format!(
+                    "gonk.mount `{line}`: sector= is given twice — one peer, one sector"
+                ));
+            }
+            sector = Some(sector_of(line, value)?);
+        } else if certs.is_none() {
+            certs = Some(expand_home(word, home));
+        } else {
+            return Err(format!(
+                "gonk.mount `{line}`: unexpected `{}`",
+                word.trim_matches('"')
+            ));
+        }
     }
     let target = match target.strip_prefix("quic://") {
         Some(authority) => {
@@ -465,9 +583,11 @@ pub fn parse(line: &str, home: &Path) -> Result<Mount, String> {
             Target::Socket(expand_home(target, home))
         }
     };
+    let sector = sector.unwrap_or_else(|| default_sector(&target));
     Ok(Mount {
         prefix: prefix.to_string(),
         target,
+        sector,
     })
 }
 
@@ -505,9 +625,24 @@ pub(crate) fn expand_home(spelled: &str, home: &Path) -> PathBuf {
 /// [#1576](http://localhost:1062/l/default/item/1576)). A mount under any other prefix calls no
 /// model gonk knows of, so it spends nothing either (ledger #3553): its net grant is its bound.
 pub fn space(mount: &Mount, calls: &Window) -> Arc<dyn Space> {
+    space_recorded(mount, calls, None)
+}
+
+/// [`space`], with every call the mount sends its peer written into `record` as a
+/// [`PEER_CALL_CLASS`] entry naming the peer's sector (ledger #4555): what `main` builds.
+pub fn space_recorded(
+    mount: &Mount,
+    calls: &Window,
+    record: Option<Arc<crate::access::Record>>,
+) -> Arc<dyn Space> {
     let origin = mount.target.to_string();
+    let lazy = LazyMount::new(mount.target.clone()).with_sector(mount.sector.clone());
+    let lazy = match record {
+        Some(record) => lazy.with_record(record),
+        None => lazy,
+    };
     let remote = Arc::new(MountedRemote::overriding(
-        Arc::new(LazyMount::new(mount.target.clone())) as Arc<dyn Resolver>,
+        Arc::new(lazy) as Arc<dyn Resolver>,
         mount.prefix.clone(),
         origin,
     ));
@@ -697,6 +832,11 @@ pub struct LazyMount {
     describe_timeout: Duration,
     /// Every other call's deadline ([`CALL_TIMEOUT`] unless the mount sets its own).
     call_timeout: Duration,
+    /// The peer's sector ([`Mount::sector`]), when the mount line named one: on the dial's
+    /// stderr line and on every call's audit entry. A layer binding's door has none yet.
+    sector: Option<String>,
+    /// Where each call's [`PEER_CALL_CLASS`] entry is written, if anywhere.
+    record: Option<Arc<crate::access::Record>>,
 }
 
 /// A connected peer, by transport: kept concrete, not as `dyn Resolver`, because a call that asks
@@ -749,7 +889,69 @@ impl LazyMount {
             fresh: false,
             describe_timeout: DESCRIBE_TIMEOUT,
             call_timeout: CALL_TIMEOUT,
+            sector: None,
+            record: None,
         }
+    }
+
+    /// Name the peer's sector (builder, ledger #4555): it goes on the dial's stderr line and
+    /// on every call's audit entry.
+    pub fn with_sector(mut self, sector: String) -> LazyMount {
+        self.sector = Some(sector);
+        self
+    }
+
+    /// The peer's sector ([`LazyMount::with_sector`]).
+    pub fn sector(&self) -> Option<&str> {
+        self.sector.as_deref()
+    }
+
+    /// Write a [`PEER_CALL_CLASS`] entry into `record` for every call sent to the peer
+    /// (builder).
+    pub fn with_record(mut self, record: Arc<crate::access::Record>) -> LazyMount {
+        self.record = Some(record);
+        self
+    }
+
+    /// The peer as the stderr line names it: the target, and its sector when there is one.
+    fn peer_named(&self) -> String {
+        match &self.sector {
+            Some(sector) => format!("{} (sector {sector})", self.target),
+            None => self.target.to_string(),
+        }
+    }
+
+    /// Write one call's [`PEER_CALL_CLASS`] entry, when there is a record to write it to.
+    fn audit(
+        &self,
+        target: &str,
+        verb: Verb,
+        capability: &Capability,
+        outcome: Result<(), &Error>,
+        took: Duration,
+    ) {
+        let Some(record) = &self.record else {
+            return;
+        };
+        let mut entry = ikigai_log::Entry::new(crate::access::now(), PEER_CALL_CLASS, target)
+            .with("peer", self.target.to_string());
+        if let Some(sector) = &self.sector {
+            entry = entry.with("sector", sector.clone());
+        }
+        entry = entry
+            .with("verb", crate::access::verb_word(verb))
+            .with(
+                "outcome",
+                match outcome {
+                    Ok(()) => "ok",
+                    Err(error) => error.kind(),
+                },
+            )
+            .with("dur", took.as_millis().to_string());
+        if let Some(principal) = capability.principal() {
+            entry = entry.with(ikigai_log::PRINCIPAL_KEY, principal.to_string());
+        }
+        record.entry(entry);
     }
 
     /// Set the deadline every call that is not a self-description runs under (builder):
@@ -835,7 +1037,7 @@ impl LazyMount {
                 state.hold_until = Some(Instant::now() + hold_after(state.failures));
                 // Once per hold window, not once per request: a down peer must not be able
                 // to fill a launchd log.
-                eprintln!("ikigai-gonk: mount {}: {e}", self.target);
+                eprintln!("ikigai-gonk: mount {}: {e}", self.peer_named());
                 Err(Error::Unavailable(format!(
                     "the mounted peer at {}: {e}",
                     self.target
@@ -1040,7 +1242,18 @@ impl Resolver for LazyMount {
                 self.target
             )));
         }
-        let peer = self.resolver()?;
+        let started = Instant::now();
+        let (forwarded, verb) = (request.target.as_str().to_string(), request.verb);
+        let peer = match self.resolver() {
+            Ok(peer) => peer,
+            Err(error) => {
+                // A call that could not be sent is still a call to this peer: its line says
+                // why, so the record shows the peer was down when someone asked.
+                self.audit(&forwarded, verb, capability, Err(&error), started.elapsed());
+                return Err(error);
+            }
+        };
+        let asked = capability.clone();
         let capability = capability.clone();
         let target = self.target.to_string();
         // A long poll (`wait=`) runs under the call deadline plus its wait; everything else
@@ -1060,14 +1273,23 @@ impl Resolver for LazyMount {
             (None, Some(left)) => Some(standing.min(left)),
             (own, None) => own,
         };
-        let answer =
-            off_thread(move || peer.issue_as(request, &capability, deadline)).ok_or_else(|| {
-                Error::Endpoint(format!("the mount to {target} panicked serving this call"))
-            })?;
+        let answer = off_thread(move || peer.issue_as(request, &capability, deadline))
+            .unwrap_or_else(|| {
+                Err(Error::Endpoint(format!(
+                    "the mount to {target} panicked serving this call"
+                )))
+            });
         if matches!(answer, Err(Error::Unavailable(_))) {
             self.drop_connection();
         }
         let answer = answer.map_err(|error| self.naming_the_peer(error));
+        self.audit(
+            &forwarded,
+            verb,
+            &asked,
+            answer.as_ref().map(|_| ()),
+            started.elapsed(),
+        );
         if self.fresh {
             return answer.map(|(representation, _)| {
                 (
