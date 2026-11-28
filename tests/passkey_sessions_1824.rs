@@ -204,8 +204,7 @@ impl Server {
             &authenticator.login_body(&c, &self.origin(), count),
         );
         assert_eq!(login.status, 200, "{login:?}");
-        let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
-        v["session"].as_str().unwrap().to_string()
+        common::session_cookie(&login.head).expect("a session cookie")
     }
 
     /// The `/auth/session` status for `token`: 200 for a live session, 404 for none.
@@ -637,7 +636,10 @@ fn the_sign_in_sets_an_http_only_cookie_and_the_page_needs_no_token() {
     );
     assert_eq!(login.status, 200, "{login:?}");
     let v: serde_json::Value = serde_json::from_str(&login.body).unwrap();
-    let token = v["session"].as_str().unwrap().to_string();
+    // The token travels in the cookie only, never in the body (ledger #4542).
+    let token = common::session_cookie(&login.head).expect("a session cookie");
+    assert!(v.get("session").is_none(), "{login:?}");
+    assert!(!login.body.contains(&token), "{login:?}");
     assert_eq!(
         set_cookies(&login),
         vec![format!(

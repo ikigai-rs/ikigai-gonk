@@ -229,13 +229,12 @@ impl Server {
         );
         assert_eq!(registered.status, 200, "{registered:?}");
         let c = challenge("login-options");
-        let login = self.post_json(
+        common::post_page(
+            self.addr,
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
-        );
-        assert_eq!(login.status, 200, "{login:?}");
-        let v: serde_json::Value = serde_json::from_slice(&login.body).expect("a JSON session");
-        v["session"].as_str().unwrap().to_string()
+        )
+        .session()
     }
 
     /// A person opening a page by typing its address.

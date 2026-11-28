@@ -486,16 +486,13 @@ fn redeeming_while_signed_in_works_over_http() {
     assert_eq!(status, 200, "{body}");
     let (_, options) = post(&gonk, "/auth/login-options", "{}");
     let challenge: Value = serde_json::from_str(&options).unwrap();
-    let (status, body) = post(
-        &gonk,
+    // The token rides in the HttpOnly cookie only, never the body (ledger #4542).
+    let session = common::post_page(
+        gonk.http,
         "/auth/login",
         &laptop.login_body(challenge["challenge"].as_str().unwrap(), &origin, 1),
-    );
-    assert_eq!(status, 200, "{body}");
-    let session = serde_json::from_str::<Value>(&body).unwrap()["session"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    )
+    .session();
 
     let write = grants_for("default", Authority::Write).unwrap();
     let code = identity::invite(&gonk.layout, "writer", &write, false, 5, now).unwrap();
@@ -518,14 +515,15 @@ fn redeeming_while_signed_in_works_over_http() {
         &session,
         &code,
     );
-    let (status, body) = post(&gonk, "/auth/add-grant", &widen);
-    assert_eq!(status, 200, "{body}");
-    let done: Value = serde_json::from_str(&body).unwrap();
+    let widened = common::post_page(gonk.http, "/auth/add-grant", &widen);
+    assert_eq!(widened.status, 200, "{widened:?}");
+    let done = widened.json();
     assert_eq!(done["added"], "writer");
     assert_eq!(done["grants"], json!(["viewer", "writer"]));
     assert_eq!(done["grant"], "viewer, writer");
-    let fresh = done["session"].as_str().unwrap();
-    assert_ne!(fresh, session);
+    assert!(done.get("session").is_none(), "{done}");
+    let fresh = &widened.session();
+    assert_ne!(fresh, &session);
 
     let (status, _) = post(&gonk, "/auth/session", &session);
     assert_eq!(status, 404, "the old session ended");

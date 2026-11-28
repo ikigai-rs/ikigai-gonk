@@ -519,15 +519,12 @@ fn sign_in_to_browse(gonk: &Gonk) -> String {
         &auth.register_body(&challenge("/auth/register-options"), &invite, &origin),
         None,
     );
-    let session: serde_json::Value = serde_json::from_str(&http(
-        gonk,
-        "POST",
+    common::post_page(
+        gonk.http,
         "/auth/login",
         &auth.login_body(&challenge("/auth/login-options"), &origin, 1),
-        None,
-    ))
-    .unwrap();
-    session["session"].as_str().unwrap().to_string()
+    )
+    .session()
 }
 
 /// #3268: startup and live reload use exactly the configured GitHub root set.

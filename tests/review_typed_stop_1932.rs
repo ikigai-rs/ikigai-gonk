@@ -372,13 +372,13 @@ impl Gonk {
         );
         assert_eq!(answer.status, 200, "{}", answer.body);
         let c = self.challenge("login-options");
-        let answer = self.post_json(
+        let answer = common::post_page(
+            self.addr,
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
         );
         assert_eq!(answer.status, 200, "{}", answer.body);
-        let v: serde_json::Value = serde_json::from_str(&answer.body).expect("a session");
-        v["session"].as_str().expect("session").to_string()
+        answer.session()
     }
 
     /// The Review button's click: browse's own `hx-get`, folded into `/k?c=` as `web/gonk.js`

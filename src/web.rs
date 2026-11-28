@@ -5486,6 +5486,10 @@ impl Endpoint for PasskeyDoor {
                     "credential": credential,
                 })))
             }
+            // ★ The token rides in the HttpOnly `Set-Cookie` ONLY, never in the body (ledger
+            // #4542): the script that made the request reads the body, so a token there is a
+            // token any script on the page (or anything that logs bodies) can take. The body
+            // names the session by `sessionId`, its digest, which authorizes nothing.
             "add-grant" => {
                 let (token, who, added) = self
                     .passkeys
@@ -5494,7 +5498,6 @@ impl Endpoint for PasskeyDoor {
                 let seconds = who.expires.saturating_sub(now);
                 with_cookie(
                     json_repr(json!({
-                        "session": token,
                         "sessionId": identity::session_id(&token),
                         "seconds": who.expires.saturating_sub(now),
                         "label": who.enrolled.label,
@@ -5513,7 +5516,6 @@ impl Endpoint for PasskeyDoor {
                 let seconds = who.expires.saturating_sub(now);
                 with_cookie(
                     json_repr(json!({
-                        "session": token,
                         "sessionId": identity::session_id(&token),
                         "seconds": seconds,
                         "label": who.enrolled.label,
@@ -5552,7 +5554,6 @@ impl Endpoint for PasskeyDoor {
                     .map_err(|m| Error::Denied(m.into()))?;
                 let seconds = who.expires.saturating_sub(now);
                 let mut answer = session_answer(&who, now);
-                answer["session"] = json!(token);
                 answer["sessionId"] = json!(identity::session_id(&token));
                 with_cookie(json_repr(answer), &site.session_cookie(&token, seconds))
             }
@@ -5638,6 +5639,8 @@ impl Endpoint for PasskeyDoor {
                  `login-options` mint a single-use challenge; `register` enrolls a credential \
                  against a one-time invite; `login` verifies an assertion and opens a session \
                  whose capability is the union of its passkey's grants in gonk/grants.json; \
+                 `login`, `add-grant` and `reassert` set the session token in an HttpOnly \
+                 cookie and answer only its `sessionId`, never the token itself; \
                  `add-grant-options` and `add-grant` redeem an invite while signed in by adding \
                  its grant to the signed-in person (so to every passkey of that person), against \
                  a fresh assertion by a passkey of that person, end every session of the \

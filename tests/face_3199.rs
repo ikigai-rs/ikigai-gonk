@@ -233,14 +233,14 @@ impl Server {
             &authenticator.register_body(&c, &invite, &self.origin()),
         );
         assert_eq!(registered.status, 200, "{registered:?}");
+        // The token rides in the HttpOnly cookie only, never the body (ledger #4542).
         let c = challenge("login-options");
-        let login = self.post_json(
+        common::post_page(
+            self.addr,
             "/auth/login",
             &authenticator.login_body(&c, &self.origin(), 1),
-        );
-        assert_eq!(login.status, 200, "{login:?}");
-        let v: serde_json::Value = serde_json::from_str(&login.text()).unwrap();
-        v["session"].as_str().unwrap().to_string()
+        )
+        .session()
     }
 
     /// A person opening a page by typing its address.
