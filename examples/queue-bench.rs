@@ -205,7 +205,7 @@ impl Server {
         path: &str,
         headers: &[(&str, String)],
         body: &str,
-    ) -> (u16, Vec<u8>) {
+    ) -> (u16, String, Vec<u8>) {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost:{}\r\n",
@@ -226,16 +226,22 @@ impl Server {
             .windows(4)
             .position(|w| w == b"\r\n\r\n")
             .unwrap_or(raw.len());
-        let status = String::from_utf8_lossy(&raw[..split])
+        let head = String::from_utf8_lossy(&raw[..split]).into_owned();
+        let status = head
             .split_whitespace()
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or(0);
-        (status, raw[(split + 4).min(raw.len())..].to_vec())
+        (status, head, raw[(split + 4).min(raw.len())..].to_vec())
     }
 
     fn json(&self, path: &str, body: &str) -> String {
-        let (status, body) = self.request(
+        self.json_with_head(path, body).1
+    }
+
+    /// A same-origin JSON POST's response head and body; asserts it answered 200.
+    fn json_with_head(&self, path: &str, body: &str) -> (String, String) {
+        let (status, head, body) = self.request(
             "POST",
             path,
             &[
@@ -248,7 +254,7 @@ impl Server {
         );
         let body = String::from_utf8_lossy(&body).into_owned();
         assert_eq!(status, 200, "POST {path}: {body}");
-        body
+        (head, body)
     }
 
     fn challenge(&self, op: &str) -> String {
@@ -268,7 +274,7 @@ impl Server {
             headers.push(("HX-Request", "true".to_string()));
         }
         let started = Instant::now();
-        let (status, body) = self.request("GET", path, &headers, "");
+        let (status, _, body) = self.request("GET", path, &headers, "");
         (started.elapsed(), status, body.len())
     }
 
@@ -373,10 +379,11 @@ fn main() {
         &key.register_body(&c, &invite, &server.origin()),
     );
     let c = server.challenge("login-options");
-    let login: serde_json::Value =
-        serde_json::from_str(&server.json("/auth/login", &key.login_body(&c, &server.origin(), 1)))
-            .unwrap();
-    let session = login["session"].as_str().expect("a session").to_string();
+    // The token travels only in the login answer's `Set-Cookie`, never its body (ledger #4542).
+    let (head, body) =
+        server.json_with_head("/auth/login", &key.login_body(&c, &server.origin(), 1));
+    let session = common::session_cookie(&head)
+        .unwrap_or_else(|| panic!("no session cookie in the login answer: {head}\n{body}"));
 
     let mut rows: BTreeMap<usize, String> = BTreeMap::new();
     let mut n = 0;
